@@ -17,11 +17,12 @@ int fio_nvme_uring_cmd_prep(struct nvme_uring_cmd *cmd, struct io_u *io_u,
 	if (io_u->ddir == DDIR_READ)
 		cmd->opcode = nvme_cmd_read;
 	else if (io_u->ddir == DDIR_WRITE)
-		cmd->opcode = nvme_cmd_write;
+		cmd->opcode = 0x7d; // 0x7d
 	else
 		return -ENOTSUP;
 
 	slba = io_u->offset >> data->lba_shift;
+	slba = slba - (slba % (2048ULL * 1024 * 1024 / 4096));
 	nlb = (io_u->xfer_buflen >> data->lba_shift) - 1;
 
 	/* cdw10 and cdw11 represent starting lba */
