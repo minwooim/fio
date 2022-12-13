@@ -166,7 +166,7 @@ class TimeSeries(object):
         f = open(fn, 'r')
         p_time = 0
         for line in f:
-            (time, value, foo, bar) = line.rstrip('\r\n').rsplit(', ')
+            (time, value, foo, bar, _) = line.rstrip('\r\n').rsplit(', ')
             self.add_sample(p_time, int(time), int(value))
             p_time = int(time)
  
