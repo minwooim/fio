@@ -100,6 +100,10 @@ def print_all_stats(ctx, series):
     while (start < ftime):  # for each time interval
         end = ftime if ftime < end else end
         sample_arrays = [ s.get_samples(start, end) for s in series ]
+        if sample_arrays == [[]]:
+            start += ctx.interval
+            end += ctx.interval
+            continue
         samplevalue_arrays = []
         for sample_array in sample_arrays:
             samplevalue_arrays.append( 
