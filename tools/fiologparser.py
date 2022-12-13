@@ -124,7 +124,7 @@ def print_all_stats(ctx, series):
 
 def median(values):
     s=sorted(values)
-    return float(s[(len(s)-1)/2]+s[(len(s)/2)])/2
+    return float(s[int((len(s)-1)/2)]+s[int((len(s)/2))])/2
 
 def percentile(values, p):
     s = sorted(values)
