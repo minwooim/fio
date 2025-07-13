@@ -716,7 +716,7 @@ static void do_verify(struct thread_data *td, uint64_t verify_bytes)
 
 		if (verify_state_should_stop(td, io_u)) {
 			put_io_u(td, io_u);
-			break;
+			continue;
 		}
 
 		if (td->o.verify_async)
@@ -1085,7 +1085,7 @@ static void do_io(struct thread_data *td, uint64_t *bytes_done)
 
 			if (verify_state_should_stop(td, io_u)) {
 				put_io_u(td, io_u);
-				break;
+				continue;
 			}
 
 			if (td->o.verify_async)
@@ -1259,7 +1259,7 @@ static int init_file_completion_logging(struct thread_data *td,
 
 	for_each_file(td, f, i) {
 		f->last_write_comp = scalloc(td->last_write_comp_depth,
-					     sizeof(uint64_t));
+					     sizeof(struct write_comp_entry));
 		if (!f->last_write_comp)
 			goto cleanup;
 	}

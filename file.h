@@ -44,6 +44,15 @@ enum file_lock_mode {
 };
 
 /*
+ * Write completion entry for tracking completed writes with timestamps
+ * Used for offline verification FSYNC filtering
+ */
+struct write_comp_entry {
+	uint64_t offset;
+	uint64_t timestamp_ns;
+};
+
+/*
  * How fio chooses what file to service next. Choice of uniformly random, or
  * some skewed random variants, or just sequentially go through them or
  * roundrobing.
@@ -126,8 +135,14 @@ struct fio_file {
 	 * Tracks the last iodepth number of completed writes, if data
 	 * verification is enabled
 	 */
-	uint64_t *last_write_comp;
+	struct write_comp_entry *last_write_comp;
 	unsigned int last_write_idx;
+	
+	/*
+	 * Tracks the timestamp of the last completed FSYNC operation
+	 * for offline verification filtering
+	 */
+	uint64_t last_sync_timestamp_ns;
 
 	/*
 	 * For use by the io engine to store offset

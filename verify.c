@@ -1634,7 +1634,7 @@ static int __fill_file_completions(struct thread_data *td,
 				   struct fio_file *f, unsigned int *index)
 {
 	unsigned int comps;
-	int i, j;
+	int i, j, valid_comps = 0;
 
 	if (!f->last_write_comp)
 		return 0;
@@ -1648,13 +1648,25 @@ static int __fill_file_completions(struct thread_data *td,
 	for (i = 0; i < comps; i++) {
 		if (j == -1)
 			j = td->last_write_comp_depth - 1;
-		s->comps[*index].fileno = __cpu_to_le64(f->fileno);
-		s->comps[*index].offset = cpu_to_le64(f->last_write_comp[j]);
-		(*index)++;
+		
+		/* Skip empty entries */
+		if (f->last_write_comp[j].timestamp_ns == 0) {
+			j--;
+			continue;
+		}
+		
+		/* Only include writes that completed before the last FSYNC */
+		if (f->last_sync_timestamp_ns == 0 ||
+		    f->last_write_comp[j].timestamp_ns <= f->last_sync_timestamp_ns) {
+			s->comps[*index].fileno = __cpu_to_le64(f->fileno);
+			s->comps[*index].offset = cpu_to_le64(f->last_write_comp[j].offset);
+			(*index)++;
+			valid_comps++;
+		}
 		j--;
 	}
 
-	return comps;
+	return valid_comps;
 }
 
 static int fill_file_completions(struct thread_data *td,

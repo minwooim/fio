@@ -2065,6 +2065,7 @@ static void account_io_completion(struct thread_data *td, struct io_u *io_u,
 static void file_log_write_comp(const struct thread_data *td, struct fio_file *f,
 				uint64_t offset, unsigned int bytes)
 {
+	struct timespec ts;
 	int idx;
 
 	if (!f)
@@ -2078,8 +2079,11 @@ static void file_log_write_comp(const struct thread_data *td, struct fio_file *f
 	if (!f->last_write_comp)
 		return;
 
+	fio_gettime(&ts, NULL);
+
 	idx = f->last_write_idx++;
-	f->last_write_comp[idx] = offset;
+	f->last_write_comp[idx].offset = offset;
+	f->last_write_comp[idx].timestamp_ns = ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 	if (f->last_write_idx == td->last_write_comp_depth)
 		f->last_write_idx = 0;
 }
@@ -2126,8 +2130,13 @@ static void io_completed(struct thread_data *td, struct io_u **io_u_ptr,
 		if (io_u->error)
 			goto error;
 		if (f) {
+			struct timespec ts;
 			f->first_write = -1ULL;
 			f->last_write = -1ULL;
+			
+			/* Record FSYNC completion timestamp for offline verification */
+			fio_gettime(&ts, NULL);
+			f->last_sync_timestamp_ns = ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 		}
 		if (should_account(td))
 			account_io_completion(td, io_u, icd, ddir, io_u->buflen);
