@@ -691,6 +691,21 @@ static void do_verify(struct thread_data *td, uint64_t verify_bytes)
 				break;
 		}
 
+		if (verify_state_should_skip(td, io_u->numberio)) {
+			/* Skip this block, but account for it so we can move to next block */
+			struct fio_file *f = io_u->file;
+
+			td->io_issues[DDIR_READ]++;
+			td->verify_read_issues++;
+
+			/* Update file position to skip this block */
+			if (f && io_u->ddir == DDIR_READ)
+				f->last_pos[io_u->ddir] = io_u->offset + io_u->xfer_buflen;
+
+			put_io_u(td, io_u);
+			continue;
+		}
+
 		if (verify_state_should_stop(td, io_u->numberio)) {
 			put_io_u(td, io_u);
 			break;
@@ -1152,6 +1167,20 @@ static void do_io(struct thread_data *td, uint64_t *bytes_done)
 					io_u->rand_seed *= __rand(&td->verify_state);
 			}
 
+			if (verify_state_should_skip(td, td->io_issues[io_u->ddir])) {
+				struct fio_file *f = io_u->file;
+
+				/* Update file position to skip this block */
+				if (f)
+					f->last_pos[io_u->ddir] = io_u->offset + io_u->xfer_buflen;
+
+				/* Account for this I/O so we move to the next sequence */
+				td->io_issues[io_u->ddir]++;
+
+				put_io_u(td, io_u);
+				continue;
+			}
+
 			if (verify_state_should_stop(td, td->io_issues[io_u->ddir])) {
 				put_io_u(td, io_u);
 				break;
@@ -1319,6 +1348,8 @@ static void free_inflight_logging(struct thread_data *td)
 {
 	if (td->inflight_numberio)
 		sfree(td->inflight_numberio);
+	if (td->failed_numberio)
+		free(td->failed_numberio);
 }
 
 static void cleanup_io_u(struct thread_data *td)

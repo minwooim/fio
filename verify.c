@@ -1655,7 +1655,8 @@ struct all_io_list *get_all_io_list(int save_mask, size_t *sz)
 			continue;
 		td->stop_io = 1;
 		td->flags |= TD_F_VSTATE_SAVED;
-		depth += (td->o.iodepth * td->o.nr_files);
+		/* Include both inflight and failed I/Os in the state */
+		depth += ((td->o.iodepth + td->failed_numberio_count) * td->o.nr_files);
 		nr++;
 	} end_for_each();
 
@@ -1672,14 +1673,24 @@ struct all_io_list *get_all_io_list(int save_mask, size_t *sz)
 	next = &rep->state[0];
 	for_each_td(td) {
 		struct thread_io_list *s = next;
+		unsigned int total_depth;
 
 		if (save_mask != IO_LIST_ALL && (__td_index + 1) != save_mask)
 			continue;
 
+		/* First, copy regular inflight I/Os */
 		for (int i = 0; i < td->o.iodepth; i++)
 			s->inflight[i].numberio = cpu_to_le64(atomic_load_acquire(&td->inflight_numberio[i]));
 
-		s->depth = cpu_to_le32((uint32_t) td->o.iodepth);
+		/* Then, append failed I/Os to exclude them from verification */
+		for (unsigned int i = 0; i < td->failed_numberio_count; i++) {
+			s->inflight[td->o.iodepth + i].numberio = cpu_to_le64(td->failed_numberio[i]);
+			dprint(FD_VERIFY, "Added failed numberio=%"PRIu64" to inflight list\n",
+				td->failed_numberio[i]);
+		}
+
+		total_depth = td->o.iodepth + td->failed_numberio_count;
+		s->depth = cpu_to_le32((uint32_t) total_depth);
 		s->numberio = cpu_to_le64((uint64_t) atomic_load_acquire(&td->inflight_issued));
 		s->index = cpu_to_le64((uint64_t) __td_index);
 		if (td->random_state.use64) {
@@ -1825,6 +1836,26 @@ void verify_assign_state(struct thread_data *td, void *p)
 		dprint(FD_VERIFY, "verify_assign_state numberio=%"PRIu64", inflight[%d]=%"PRIu64"\n", s->numberio, i, s->inflight[i].numberio);
 	}
 
+	/*
+	 * Restore failed I/Os from state. Failed I/Os are appended after
+	 * the regular inflight array (starting at index td->o.iodepth).
+	 */
+	if (s->depth > td->o.iodepth) {
+		unsigned int failed_count = s->depth - td->o.iodepth;
+
+		td->failed_numberio = malloc(failed_count * sizeof(uint64_t));
+		td->failed_numberio_alloc = failed_count;
+		td->failed_numberio_count = 0;
+
+		for (i = td->o.iodepth; i < s->depth; i++) {
+			uint64_t nio = s->inflight[i].numberio;
+			if (nio != INVALID_NUMBERIO) {
+				td->failed_numberio[td->failed_numberio_count++] = nio;
+				dprint(FD_VERIFY, "Restored failed numberio=%"PRIu64"\n", nio);
+			}
+		}
+	}
+
 	td->vstate = p;
 }
 
@@ -1906,6 +1937,26 @@ err:
 }
 
 /*
+ * Check if this I/O should be skipped during verification (because it failed during write)
+ */
+int verify_state_should_skip(struct thread_data *td, uint64_t numberio)
+{
+	unsigned int i;
+
+	if (!td->failed_numberio || td->failed_numberio_count == 0)
+		return 0;
+
+	for (i = 0; i < td->failed_numberio_count; i++) {
+		if (td->failed_numberio[i] == numberio) {
+			dprint(FD_VERIFY, "Skipping failed numberio=%"PRIu64"\n", numberio);
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
+/*
  * Use the loaded verify state to know when to stop doing verification
  */
 int verify_state_should_stop(struct thread_data *td, uint64_t numberio)
@@ -1918,10 +1969,12 @@ int verify_state_should_stop(struct thread_data *td, uint64_t numberio)
 		return 0;
 
 	/* If the current seq is lower than the max issued seq, check to make sure
-	 * the write was not inflight.
+	 * the write was not inflight (but exclude failed writes, they should be skipped not stopped).
 	 */
 	if (numberio < s->numberio) {
-		for (i = 0; i < s->depth; i++) {
+		/* Check only the actual inflight array (first td->o.iodepth entries) */
+		int actual_depth = (s->depth > td->o.iodepth) ? td->o.iodepth : s->depth;
+		for (i = 0; i < actual_depth; i++) {
 			if (s->inflight[i].numberio == numberio) {
 				log_info("Stop verify because seq %"PRIu64" was an inflight write\n",
 					numberio);
