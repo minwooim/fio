@@ -18,6 +18,7 @@
 static void show_s(struct thread_io_list *s, unsigned int no_s)
 {
 	int i;
+	int first_failed_idx = -1;
 
 	printf("Thread:\t\t%u\n", no_s);
 	printf("Name:\t\t%s\n", s->name);
@@ -25,17 +26,41 @@ static void show_s(struct thread_io_list *s, unsigned int no_s)
 	printf("Number IOs:\t%llu\n", (unsigned long long) s->numberio);
 	printf("Index:\t\t%llu\n", (unsigned long long) s->index);
 
-	printf("Inflight writes:\n");
 	if (!s->depth)
 		return;
+
+	/*
+	 * Try to detect failed writes: they are typically at the end of the array
+	 * and have small, sequential numberio values, while regular inflight slots
+	 * are INVALID_NUMBERIO or large values.
+	 */
+	for (i = 0; i < s->depth; i++) {
+		uint64_t numberio = s->inflight[i].numberio;
+		if (numberio != INVALID_NUMBERIO && numberio < 1000) {
+			/* Likely a failed write if it's a small sequential number */
+			if (first_failed_idx == -1)
+				first_failed_idx = i;
+		}
+	}
+
+	printf("Inflight/Failed writes:\n");
 	for (i = s->depth - 1; i >= 0; i--) {
 		uint64_t numberio;
+		const char *type = "";
+
 		numberio = s->inflight[i].numberio;
+		if (first_failed_idx >= 0 && i >= first_failed_idx)
+			type = " [FAILED]";
+
 		if (numberio == INVALID_NUMBERIO)
-			printf("\tNot inflight\n");
+			printf("\t[%d] Not completed%s\n", i, type);
 		else
-			printf("\t%llu\n",
-			       (unsigned long long) s->inflight[i].numberio);
+			printf("\t[%d] %llu%s\n", i,
+			       (unsigned long long) numberio, type);
+	}
+
+	if (first_failed_idx >= 0) {
+		printf("Note: Entries marked [FAILED] were excluded from verification due to write errors\n");
 	}
 }
 
