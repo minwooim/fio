@@ -733,6 +733,12 @@ static void do_verify(struct thread_data *td, uint64_t verify_bytes)
 				break;
 		}
 
+		if (verify_state_should_skip(td, io_u->numberio)) {
+			td->io_issues[DDIR_READ]++;
+			put_io_u(td, io_u);
+			continue;
+		}
+
 		if (verify_state_should_stop(td, io_u->numberio)) {
 			put_io_u(td, io_u);
 			break;
@@ -1207,7 +1213,14 @@ static void do_io(struct thread_data *td, uint64_t *bytes_done)
 					io_u->rand_seed *= __rand(&td->verify_state);
 			}
 
-			if (verify_state_should_stop(td, td->io_issues[io_u->ddir])) {
+			if (verify_state_should_skip(td, io_u->numberio)) {
+				/* Account for this I/O so we move to the next sequence */
+				td->io_issues[io_u->ddir]++;
+				put_io_u(td, io_u);
+				continue;
+			}
+
+			if (verify_state_should_stop(td, io_u->numberio)) {
 				put_io_u(td, io_u);
 				break;
 			}
@@ -1380,6 +1393,8 @@ static void free_inflight_logging(struct thread_data *td)
 {
 	if (td->inflight_numberio)
 		sfree(td->inflight_numberio);
+	if (td->failed_numberio)
+		free(td->failed_numberio);
 }
 
 static void cleanup_io_u(struct thread_data *td)
@@ -1777,8 +1792,10 @@ static uint64_t do_dry_run(struct thread_data *td)
 		if (td_write(td) && io_u->ddir == DDIR_WRITE &&
 		    td->o.do_verify &&
 		    td->o.verify != VERIFY_NONE &&
-		    !td->o.experimental_verify)
-			log_io_piece(td, io_u);
+		    !td->o.experimental_verify) {
+			if (!verify_state_should_skip(td, io_u->numberio))
+				log_io_piece(td, io_u);
+		}
 
 		ret = io_u_sync_complete(td, io_u);
 		(void) ret;
