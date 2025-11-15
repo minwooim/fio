@@ -269,6 +269,37 @@ struct io_piece {
 };
 
 /*
+ * Shared verify table for multiple jobs
+ */
+#define VERIFY_TABLE_HASH_BITS 10
+#define VERIFY_TABLE_HASH_SIZE (1 << VERIFY_TABLE_HASH_BITS)
+#define MAX_VERIFY_TABLES 256
+
+struct verify_table_bucket {
+	pthread_mutex_t lock;
+	struct rb_root tree;
+	unsigned long count;
+} __attribute__((aligned(64)));
+
+struct shared_verify_table {
+	int table_id;
+	struct verify_table_bucket buckets[VERIFY_TABLE_HASH_SIZE];
+	atomic_ulong total_entries;
+	atomic_ullong shared_numberio;
+	atomic_int verify_done;
+	int ref_count;
+	pthread_mutex_t ref_lock;
+
+	/*
+	 * Track write jobs to prevent verify from starting until all writes complete.
+	 * write_jobs_active: number of write jobs currently running
+	 * write_jobs_done: incremented when a write job completes
+	 */
+	atomic_int write_jobs_active;
+	atomic_int write_jobs_done;
+};
+
+/*
  * Log exports
  */
 enum file_log_act {
@@ -283,10 +314,15 @@ extern int __must_check read_iolog_get(struct thread_data *, struct io_u *);
 extern void log_io_u(const struct thread_data *, const struct io_u *);
 extern void log_file(struct thread_data *, struct fio_file *, enum file_log_act);
 extern bool __must_check init_iolog(struct thread_data *td);
-extern void log_io_piece(struct thread_data *, struct io_u *);
+extern bool log_io_piece(struct thread_data *, struct io_u *);
 extern void unlog_io_piece(struct thread_data *, struct io_u *);
 extern void trim_io_piece(const struct io_u *);
 extern void queue_io_piece(struct thread_data *, struct io_piece *);
+extern struct shared_verify_table *get_shared_verify_table(int table_id);
+extern void put_shared_verify_table(struct shared_verify_table *table);
+extern bool log_io_piece_shared(struct thread_data *, struct io_u *);
+extern void unlog_io_piece_shared(struct thread_data *, struct io_u *);
+extern int get_next_verify_shared(struct thread_data *, struct io_u *);
 extern void prune_io_piece_log(struct thread_data *);
 extern void write_iolog_close(struct thread_data *);
 int64_t iolog_items_to_fetch(struct thread_data *td);

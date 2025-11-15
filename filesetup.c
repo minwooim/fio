@@ -1847,6 +1847,17 @@ int add_file(struct thread_data *td, const char *fname, int numjob, int inc)
 	/* can't handle smalloc failure from here */
 	assert(f->file_name);
 
+	/* Compute file name hash once for shared verify table */
+	{
+		const char *fname = f->file_name;
+		uint64_t h = 0;
+		while (*fname) {
+			h = (h << 5) - h + *fname;  /* h * 31 + c */
+			fname++;
+		}
+		f->file_name_hash = h;
+	}
+
 	if (td->o.filetype)
 		f->filetype = td->o.filetype;
 	else

@@ -163,6 +163,12 @@ struct fio_file {
 	enum fio_file_flags flags;
 
 	struct disk_util *du;
+
+	/*
+	 * Cached hash of file_name for shared verify table lookups.
+	 * Avoids recomputing hash on every verify operation.
+	 */
+	uint64_t file_name_hash;
 };
 
 #define FILE_ENG_DATA(f)		((f)->engine_data)

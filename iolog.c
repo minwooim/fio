@@ -14,6 +14,7 @@
 
 #include "flist.h"
 #include "fio.h"
+#include "hash.h"
 #include "trim.h"
 #include "filelock.h"
 #include "smalloc.h"
@@ -280,7 +281,7 @@ void prune_io_piece_log(struct thread_data *td)
 /*
  * log a successful write, so we can unwind the log for verify
  */
-void log_io_piece(struct thread_data *td, struct io_u *io_u)
+static void __log_io_piece(struct thread_data *td, struct io_u *io_u)
 {
 	struct fio_rb_node **p, *parent;
 	struct io_piece *ipo, *__ipo;
@@ -295,7 +296,8 @@ void log_io_piece(struct thread_data *td, struct io_u *io_u)
 
 	io_u->ipo = ipo;
 
-	if (io_u_should_trim(td, io_u)) {
+	if (io_u_should_trim(td, io_u) || io_u->ddir == DDIR_TRIM) {
+		ipo->flags |= IP_F_TRIMMED;
 		flist_add_tail(&ipo->trim_list, &td->trim_list);
 		td->trim_entries++;
 	}
@@ -361,7 +363,17 @@ restart:
 	td->io_hist_len++;
 }
 
-void unlog_io_piece(struct thread_data *td, struct io_u *io_u)
+bool log_io_piece(struct thread_data *td, struct io_u *io_u)
+{
+	if (td->shared_verify_table)
+		return log_io_piece_shared(td, io_u);
+	else {
+		__log_io_piece(td, io_u);
+		return true;
+	}
+}
+
+static void __unlog_io_piece(struct thread_data *td, struct io_u *io_u)
 {
 	struct io_piece *ipo = io_u->ipo;
 
@@ -388,6 +400,14 @@ void unlog_io_piece(struct thread_data *td, struct io_u *io_u)
 	free(ipo);
 	io_u->ipo = NULL;
 	td->io_hist_len--;
+}
+
+void unlog_io_piece(struct thread_data *td, struct io_u *io_u)
+{
+	if (td->shared_verify_table)
+		unlog_io_piece_shared(td, io_u);
+	else
+		__unlog_io_piece(td, io_u);
 }
 
 void trim_io_piece(const struct io_u *io_u)
@@ -1950,4 +1970,231 @@ void fio_writeout_logs(bool unit_logs)
 	for_each_td(td) {
 		td_writeout_logs(td, unit_logs);
 	} end_for_each();
+}
+
+/*
+ * Shared verify table implementation
+ */
+static struct shared_verify_table *shared_verify_tables[MAX_VERIFY_TABLES];
+static pthread_mutex_t shared_verify_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static inline unsigned int verify_hash(struct fio_file *f, uint64_t offset)
+{
+	uint64_t h;
+
+	/* Use pre-computed file_name_hash for performance */
+	h = f->file_name_hash;
+
+	/* Combine with offset for better distribution */
+	h ^= (offset >> 12);
+	return hash_long(h, VERIFY_TABLE_HASH_BITS);
+}
+
+struct shared_verify_table *get_shared_verify_table(int table_id)
+{
+	struct shared_verify_table *table;
+	int i;
+
+	if (table_id <= 0 || table_id >= MAX_VERIFY_TABLES)
+		return NULL;
+
+	pthread_mutex_lock(&shared_verify_lock);
+
+	table = shared_verify_tables[table_id];
+	if (!table) {
+		table = smalloc(sizeof(*table));
+		if (!table) {
+			pthread_mutex_unlock(&shared_verify_lock);
+			return NULL;
+		}
+
+		memset(table, 0, sizeof(*table));
+		table->table_id = table_id;
+		atomic_init(&table->total_entries, 0);
+		atomic_init(&table->shared_numberio, 0);
+		atomic_init(&table->verify_done, 0);
+		atomic_init(&table->write_jobs_active, 0);
+		atomic_init(&table->write_jobs_done, 0);
+		pthread_mutex_init(&table->ref_lock, NULL);
+
+		for (i = 0; i < VERIFY_TABLE_HASH_SIZE; i++) {
+			pthread_mutex_init(&table->buckets[i].lock, NULL);
+			table->buckets[i].tree = RB_ROOT;
+			table->buckets[i].count = 0;
+		}
+		shared_verify_tables[table_id] = table;
+	}
+
+	pthread_mutex_lock(&table->ref_lock);
+	table->ref_count++;
+	pthread_mutex_unlock(&table->ref_lock);
+
+	pthread_mutex_unlock(&shared_verify_lock);
+	return table;
+}
+
+void put_shared_verify_table(struct shared_verify_table *table)
+{
+	struct io_piece *ipo;
+	struct fio_rb_node *n;
+	int i, should_free = 0;
+
+	if (!table)
+		return;
+
+	pthread_mutex_lock(&table->ref_lock);
+	table->ref_count--;
+	if (table->ref_count == 0)
+		should_free = 1;
+	pthread_mutex_unlock(&table->ref_lock);
+
+	if (!should_free)
+		return;
+
+	pthread_mutex_lock(&shared_verify_lock);
+
+	/* Free all entries in all buckets */
+	for (i = 0; i < VERIFY_TABLE_HASH_SIZE; i++) {
+		pthread_mutex_lock(&table->buckets[i].lock);
+
+		while ((n = rb_first(&table->buckets[i].tree)) != NULL) {
+			ipo = rb_entry(n, struct io_piece, rb_node);
+			rb_erase(n, &table->buckets[i].tree);
+			free(ipo);
+		}
+
+		pthread_mutex_unlock(&table->buckets[i].lock);
+		pthread_mutex_destroy(&table->buckets[i].lock);
+	}
+
+	pthread_mutex_destroy(&table->ref_lock);
+	shared_verify_tables[table->table_id] = NULL;
+	sfree(table);
+
+	pthread_mutex_unlock(&shared_verify_lock);
+}
+
+bool log_io_piece_shared(struct thread_data *td, struct io_u *io_u)
+{
+	struct shared_verify_table *table = td->shared_verify_table;
+	struct verify_table_bucket *bucket;
+	struct fio_rb_node **p, *parent;
+	struct io_piece *ipo, *__ipo;
+	unsigned int bucket_idx;
+	int overlap;
+
+	if (!table)
+		return true;
+
+	ipo = calloc(1, sizeof(struct io_piece));
+	init_ipo(ipo);
+	ipo->file = io_u->file;
+	ipo->offset = io_u->offset;
+	ipo->len = io_u->buflen;
+	ipo->numberio = io_u->numberio;  /* Already allocated in backend.c */
+	ipo->flags = IP_F_IN_FLIGHT;
+
+	io_u->ipo = ipo;
+
+	if (io_u_should_trim(td, io_u) || io_u->ddir == DDIR_TRIM) {
+		ipo->flags |= IP_F_TRIMMED;
+	}
+
+	bucket_idx = verify_hash(io_u->file, io_u->offset);
+	bucket = &table->buckets[bucket_idx];
+
+	RB_CLEAR_NODE(&ipo->rb_node);
+
+	pthread_mutex_lock(&bucket->lock);
+
+restart:
+	p = &bucket->tree.rb_node;
+	parent = NULL;
+	overlap = 0;
+
+	while (*p) {
+		parent = *p;
+		__ipo = rb_entry(parent, struct io_piece, rb_node);
+
+		/* Compare by cached file_name_hash for performance */
+		if (ipo->file->file_name_hash < __ipo->file->file_name_hash)
+			p = &(*p)->rb_left;
+		else if (ipo->file->file_name_hash > __ipo->file->file_name_hash)
+			p = &(*p)->rb_right;
+		else if (ipo->offset < __ipo->offset) {
+			p = &(*p)->rb_left;
+			overlap = ipo->offset + ipo->len > __ipo->offset;
+		} else if (ipo->offset > __ipo->offset) {
+			p = &(*p)->rb_right;
+			overlap = __ipo->offset + __ipo->len > ipo->offset;
+		} else {
+			overlap = 1;
+		}
+
+		if (overlap) {
+			/* If previous write is still in-flight, serialize by returning busy */
+			if (atomic_load_acquire(&__ipo->flags) & IP_F_IN_FLIGHT) {
+				pthread_mutex_unlock(&bucket->lock);
+				free(ipo);
+				io_u->ipo = NULL;
+				return false;  /* Caller should return FIO_Q_BUSY */
+			}
+
+			/* Previous write completed, safe to replace */
+			bucket->count--;
+			rb_erase(parent, &bucket->tree);
+			remove_trim_entry(td, __ipo);
+			free(__ipo);
+			goto restart;
+		}
+	}
+
+	rb_link_node(&ipo->rb_node, parent, p);
+	rb_insert_color(&ipo->rb_node, &bucket->tree);
+	ipo->flags |= IP_F_ONRB;
+	bucket->count++;
+	atomic_fetch_add(&table->total_entries, 1);
+
+	pthread_mutex_unlock(&bucket->lock);
+	return true;
+}
+
+void unlog_io_piece_shared(struct thread_data *td, struct io_u *io_u)
+{
+	struct io_piece *ipo = io_u->ipo;
+
+	if (td->ts.nr_block_infos) {
+		uint32_t *info = io_u_block_info(td, io_u);
+		if (BLOCK_INFO_STATE(*info) < BLOCK_STATE_TRIM_FAILURE) {
+			if (io_u->ddir == DDIR_TRIM)
+				*info = BLOCK_INFO_SET_STATE(*info,
+						BLOCK_STATE_TRIM_FAILURE);
+			else if (io_u->ddir == DDIR_WRITE)
+				*info = BLOCK_INFO_SET_STATE(*info,
+						BLOCK_STATE_WRITE_FAILURE);
+		}
+	}
+
+	if (!ipo)
+		return;
+
+	if (ipo->flags & IP_F_ONRB) {
+		struct shared_verify_table *table = td->shared_verify_table;
+		struct verify_table_bucket *bucket;
+		unsigned int bucket_idx;
+
+		bucket_idx = verify_hash(io_u->file, io_u->offset);
+		bucket = &table->buckets[bucket_idx];
+
+		pthread_mutex_lock(&bucket->lock);
+		rb_erase(&ipo->rb_node, &bucket->tree);
+		bucket->count--;
+		atomic_fetch_sub(&table->total_entries, 1);
+		pthread_mutex_unlock(&bucket->lock);
+
+		ipo->flags &= ~IP_F_ONRB;
+	}
+
+	free(ipo);
+	io_u->ipo = NULL;
 }

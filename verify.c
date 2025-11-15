@@ -1403,7 +1403,7 @@ void populate_verify_io_u(struct thread_data *td, struct io_u *io_u)
 	fill_pattern_headers(td, io_u, 0, 0);
 }
 
-int get_next_verify(struct thread_data *td, struct io_u *io_u)
+static int __get_next_verify(struct thread_data *td, struct io_u *io_u)
 {
 	struct io_piece *ipo = NULL;
 
@@ -1485,6 +1485,14 @@ int get_next_verify(struct thread_data *td, struct io_u *io_u)
 nothing:
 	dprint(FD_VERIFY, "get_next_verify: empty\n");
 	return 1;
+}
+
+int get_next_verify(struct thread_data *td, struct io_u *io_u)
+{
+	if (td->shared_verify_table)
+		return get_next_verify_shared(td, io_u);
+	else
+		return __get_next_verify(td, io_u);
 }
 
 void fio_verify_init(struct thread_data *td)
@@ -1935,4 +1943,102 @@ int verify_state_should_stop(struct thread_data *td, uint64_t numberio)
 	}
 
 	return 0;
+}
+
+int get_next_verify_shared(struct thread_data *td, struct io_u *io_u)
+{
+	struct shared_verify_table *table = td->shared_verify_table;
+	struct io_piece *ipo = NULL;
+	struct fio_rb_node *n;
+	int i;
+
+	if (!table)
+		return 1;
+
+	/*
+	 * this io_u is from a requeue, we already filled the offsets
+	 */
+	if (io_u->file)
+		return 0;
+
+	/*
+	 * Scan all buckets to find the first available entry
+	 * This is simple but not the most efficient - we could optimize
+	 * by tracking which buckets have entries
+	 */
+	for (i = 0; i < VERIFY_TABLE_HASH_SIZE; i++) {
+		struct verify_table_bucket *bucket = &table->buckets[i];
+
+		if (bucket->count == 0)
+			continue;
+
+		pthread_mutex_lock(&bucket->lock);
+
+		n = rb_first(&bucket->tree);
+		if (!n) {
+			pthread_mutex_unlock(&bucket->lock);
+			continue;
+		}
+
+		ipo = rb_entry(n, struct io_piece, rb_node);
+
+		/*
+		 * Ensure that the associated IO has completed
+		 */
+		if (atomic_load_acquire(&ipo->flags) & IP_F_IN_FLIGHT) {
+			pthread_mutex_unlock(&bucket->lock);
+			ipo = NULL;
+			continue;
+		}
+
+		rb_erase(n, &bucket->tree);
+		bucket->count--;
+		atomic_fetch_sub(&table->total_entries, 1);
+		pthread_mutex_unlock(&bucket->lock);
+
+		assert(ipo->flags & IP_F_ONRB);
+		ipo->flags &= ~IP_F_ONRB;
+		break;
+	}
+
+	if (ipo) {
+		io_u->offset = ipo->offset;
+		io_u->verify_offset = ipo->offset;
+		io_u->buflen = ipo->len;
+		io_u->numberio = ipo->numberio;
+		io_u->file = ipo->file;
+		io_u_set(td, io_u, IO_U_F_VER_LIST);
+
+		if (ipo->flags & IP_F_TRIMMED)
+			io_u_set(td, io_u, IO_U_F_TRIMMED);
+
+		if (!fio_file_open(io_u->file)) {
+			int r = td_io_open_file(td, io_u->file);
+
+			if (r) {
+				dprint(FD_VERIFY, "failed file %s open\n",
+						io_u->file->file_name);
+				return 1;
+			}
+		}
+
+		get_file(ipo->file);
+		assert(fio_file_open(io_u->file));
+		io_u->ddir = DDIR_READ;
+		io_u->xfer_buf = io_u->buf;
+		io_u->xfer_buflen = io_u->buflen;
+
+		free(ipo);
+		dprint(FD_VERIFY, "get_next_verify_shared: ret io_u %p\n", io_u);
+
+		if (!td->o.verify_pattern_bytes) {
+			io_u->rand_seed = __rand(&td->verify_state);
+			if (sizeof(int) != sizeof(long *))
+				io_u->rand_seed *= __rand(&td->verify_state);
+		}
+		return 0;
+	}
+
+	dprint(FD_VERIFY, "get_next_verify_shared: empty\n");
+	return 1;
 }
