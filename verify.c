@@ -1485,7 +1485,7 @@ static int __get_next_verify(struct thread_data *td, struct io_u *io_u)
 		io_u->xfer_buflen = io_u->buflen;
 
 		remove_trim_entry(td, ipo);
-		free(ipo);
+		free_io_piece(ipo);
 		dprint(FD_VERIFY, "get_next_verify: ret io_u %p\n", io_u);
 
 		if (!td->o.verify_pattern_bytes) {
@@ -1959,6 +1959,24 @@ int verify_state_should_stop(struct thread_data *td, uint64_t numberio)
 	return 0;
 }
 
+static struct fio_file *resolve_shared_verify_file(struct thread_data *td,
+						   const struct io_piece *ipo)
+{
+	struct fio_file *f;
+	unsigned int i;
+
+	if (!ipo->file_name)
+		return ipo->file;
+
+	for_each_file(td, f, i) {
+		if (f->file_name_hash == ipo->file_name_hash &&
+		    !strcmp(f->file_name, ipo->file_name))
+			return f;
+	}
+
+	return NULL;
+}
+
 int get_next_verify_shared(struct thread_data *td, struct io_u *io_u)
 {
 	struct shared_verify_table *table = td->shared_verify_table;
@@ -2016,11 +2034,24 @@ int get_next_verify_shared(struct thread_data *td, struct io_u *io_u)
 	}
 
 	if (ipo) {
+		struct fio_file *resolved_file;
+
+		resolved_file = resolve_shared_verify_file(td, ipo);
+		if (!resolved_file) {
+			const char *name = ipo->file_name ? : "unknown";
+
+			log_err("fio: job %s cannot resolve shared verify file '%s'\n",
+				td->o.name, name);
+			remove_trim_entry(td, ipo);
+			free_io_piece(ipo);
+			return 1;
+		}
+
 		io_u->offset = ipo->offset;
 		io_u->verify_offset = ipo->offset;
 		io_u->buflen = ipo->len;
 		io_u->numberio = ipo->numberio;
-		io_u->file = ipo->file;
+		io_u->file = resolved_file;
 		io_u_set(td, io_u, IO_U_F_VER_LIST);
 
 		/*
@@ -2049,13 +2080,13 @@ int get_next_verify_shared(struct thread_data *td, struct io_u *io_u)
 			}
 		}
 
-		get_file(ipo->file);
+		get_file(io_u->file);
 		assert(fio_file_open(io_u->file));
 		io_u->ddir = DDIR_READ;
 		io_u->xfer_buf = io_u->buf;
 		io_u->xfer_buflen = io_u->buflen;
 
-		free(ipo);
+		free_io_piece(ipo);
 		dprint(FD_VERIFY, "get_next_verify_shared: ret io_u %p\n", io_u);
 
 		if (!td->o.verify_pattern_bytes) {

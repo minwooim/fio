@@ -7,6 +7,7 @@
 #include "lib/ieee754.h"
 #include "flist.h"
 #include "ioengines.h"
+#include "smalloc.h"
 
 /*
  * Use for maintaining statistics
@@ -268,6 +269,8 @@ struct io_piece {
 	enum fio_ddir ddir;
 	unsigned long delay;
 	unsigned int file_action;
+	uint64_t file_name_hash;
+	char *file_name;
 };
 
 /*
@@ -390,6 +393,21 @@ static inline void init_ipo(struct io_piece *ipo)
 {
 	INIT_FLIST_HEAD(&ipo->list);
 	INIT_FLIST_HEAD(&ipo->trim_list);
+	ipo->file_name = NULL;
+	ipo->file_name_hash = 0;
+}
+
+static inline void free_io_piece(struct io_piece *ipo)
+{
+	if (!ipo)
+		return;
+
+	if (ipo->file_name) {
+		sfree(ipo->file_name);
+		ipo->file_name = NULL;
+	}
+
+	free(ipo);
 }
 
 struct iolog_compress {

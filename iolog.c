@@ -219,10 +219,10 @@ int read_iolog_get(struct thread_data *td, struct io_u *io_u)
 
 		ret = ipo_special(td, ipo);
 		if (ret < 0) {
-			free(ipo);
+			free_io_piece(ipo);
 			break;
 		} else if (ret > 0) {
-			free(ipo);
+			free_io_piece(ipo);
 			continue;
 		}
 
@@ -246,7 +246,7 @@ int read_iolog_get(struct thread_data *td, struct io_u *io_u)
 				usec_sleep(td, (ipo->delay - elapsed) * 1000);
 		}
 
-		free(ipo);
+		free_io_piece(ipo);
 
 		if (io_u->ddir != DDIR_WAIT)
 			return 0;
@@ -266,7 +266,7 @@ void prune_io_piece_log(struct thread_data *td)
 		rb_erase(n, &td->io_hist_tree);
 		remove_trim_entry(td, ipo);
 		td->io_hist_len--;
-		free(ipo);
+		free_io_piece(ipo);
 	}
 
 	while (!flist_empty(&td->io_hist_list)) {
@@ -274,7 +274,7 @@ void prune_io_piece_log(struct thread_data *td)
 		flist_del(&ipo->list);
 		remove_trim_entry(td, ipo);
 		td->io_hist_len--;
-		free(ipo);
+		free_io_piece(ipo);
 	}
 }
 
@@ -352,7 +352,7 @@ restart:
 			rb_erase(parent, &td->io_hist_tree);
 			remove_trim_entry(td, __ipo);
 			if (!(__ipo->flags & IP_F_IN_FLIGHT))
-				free(__ipo);
+				free_io_piece(__ipo);
 			goto restart;
 		}
 	}
@@ -397,7 +397,7 @@ static void __unlog_io_piece(struct thread_data *td, struct io_u *io_u)
 	else if (ipo->flags & IP_F_ONLIST)
 		flist_del(&ipo->list);
 
-	free(ipo);
+	free_io_piece(ipo);
 	io_u->ipo = NULL;
 	td->io_hist_len--;
 }
@@ -2060,7 +2060,7 @@ void put_shared_verify_table(struct shared_verify_table *table)
 		while ((n = rb_first(&table->buckets[i].tree)) != NULL) {
 			ipo = rb_entry(n, struct io_piece, rb_node);
 			rb_erase(n, &table->buckets[i].tree);
-			free(ipo);
+			free_io_piece(ipo);
 		}
 
 		pthread_mutex_unlock(&table->buckets[i].lock);
@@ -2089,6 +2089,13 @@ bool log_io_piece_shared(struct thread_data *td, struct io_u *io_u)
 	ipo = calloc(1, sizeof(struct io_piece));
 	init_ipo(ipo);
 	ipo->file = io_u->file;
+	ipo->file_name_hash = io_u->file->file_name_hash;
+	ipo->file_name = smalloc_strdup(io_u->file->file_name);
+	if (!ipo->file_name) {
+		free_io_piece(ipo);
+		io_u->ipo = NULL;
+		return false;
+	}
 	ipo->offset = io_u->offset;
 	ipo->len = io_u->buflen;
 	ipo->numberio = io_u->numberio;  /* Already allocated in backend.c */
@@ -2120,9 +2127,9 @@ restart:
 		__ipo = rb_entry(parent, struct io_piece, rb_node);
 
 		/* Compare by cached file_name_hash for performance */
-		if (ipo->file->file_name_hash < __ipo->file->file_name_hash)
+		if (ipo->file_name_hash < __ipo->file_name_hash)
 			p = &(*p)->rb_left;
-		else if (ipo->file->file_name_hash > __ipo->file->file_name_hash)
+		else if (ipo->file_name_hash > __ipo->file_name_hash)
 			p = &(*p)->rb_right;
 		else if (ipo->offset < __ipo->offset) {
 			p = &(*p)->rb_left;
@@ -2138,7 +2145,7 @@ restart:
 			/* If previous write is still in-flight, serialize by returning busy */
 			if (atomic_load_acquire(&__ipo->flags) & IP_F_IN_FLIGHT) {
 				pthread_mutex_unlock(&bucket->lock);
-				free(ipo);
+				free_io_piece(ipo);
 				io_u->ipo = NULL;
 				return false;  /* Caller should return FIO_Q_BUSY */
 			}
@@ -2147,7 +2154,7 @@ restart:
 			bucket->count--;
 			rb_erase(parent, &bucket->tree);
 			remove_trim_entry(td, __ipo);
-			free(__ipo);
+			free_io_piece(__ipo);
 			goto restart;
 		}
 	}
@@ -2198,6 +2205,6 @@ void unlog_io_piece_shared(struct thread_data *td, struct io_u *io_u)
 		ipo->flags &= ~IP_F_ONRB;
 	}
 
-	free(ipo);
+	free_io_piece(ipo);
 	io_u->ipo = NULL;
 }
