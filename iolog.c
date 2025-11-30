@@ -2104,6 +2104,11 @@ bool log_io_piece_shared(struct thread_data *td, struct io_u *io_u)
 
 			/* If previous write is still in-flight, serialize by returning busy */
 			if (overlap_ipo && (atomic_load_acquire(&overlap_ipo->flags) & IP_F_IN_FLIGHT)) {
+				dprint(FD_VERIFY, "skiplist: overlap in-flight [%llu, %llu), blocked by [%llu, %llu)\n",
+				       (unsigned long long)io_u->offset,
+				       (unsigned long long)(io_u->offset + io_u->buflen),
+				       (unsigned long long)overlap_ipo->offset,
+				       (unsigned long long)(overlap_ipo->offset + overlap_ipo->len));
 				free_io_piece(ipo);
 				io_u->ipo = NULL;
 				return false;  /* Caller should return FIO_Q_BUSY */
@@ -2111,6 +2116,11 @@ bool log_io_piece_shared(struct thread_data *td, struct io_u *io_u)
 
 			/* Previous write completed, safe to delete and replace */
 			if (skiplist_delete_node(table->skiplist, overlap_node) == 0) {
+				dprint(FD_VERIFY, "skiplist: delete overlap [%llu, %llu) for new [%llu, %llu)\n",
+				       (unsigned long long)overlap_ipo->offset,
+				       (unsigned long long)(overlap_ipo->offset + overlap_ipo->len),
+				       (unsigned long long)io_u->offset,
+				       (unsigned long long)(io_u->offset + io_u->buflen));
 				if (overlap_ipo) {
 					remove_trim_entry(td, overlap_ipo);
 					free_io_piece(overlap_ipo);
@@ -2123,6 +2133,10 @@ bool log_io_piece_shared(struct thread_data *td, struct io_u *io_u)
 		/* Try to insert into skiplist */
 		if (skiplist_insert(table->skiplist, io_u->offset, io_u->buflen, ipo) == 0) {
 			/* Success! */
+			dprint(FD_VERIFY, "skiplist: insert [%llu, %llu) numberio=%llu\n",
+			       (unsigned long long)io_u->offset,
+			       (unsigned long long)(io_u->offset + io_u->buflen),
+			       (unsigned long long)io_u->numberio);
 			ipo->flags |= IP_F_ONRB;  /* Reuse flag to indicate in skiplist */
 			atomic_fetch_add(&table->total_entries, 1);
 			return true;
@@ -2162,6 +2176,10 @@ void unlog_io_piece_shared(struct thread_data *td, struct io_u *io_u)
 
 		/* Use lock-free skiplist delete */
 		if (skiplist_delete(table->skiplist, io_u->offset) == 0) {
+			dprint(FD_VERIFY, "skiplist: unlog delete [%llu, %llu) numberio=%llu\n",
+			       (unsigned long long)io_u->offset,
+			       (unsigned long long)(io_u->offset + io_u->buflen),
+			       (unsigned long long)io_u->numberio);
 			atomic_fetch_sub(&table->total_entries, 1);
 		}
 

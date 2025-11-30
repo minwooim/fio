@@ -2105,6 +2105,12 @@ static void *thread_main(void *data)
 		fio_gettime(&td->start, NULL);
 		fio_sem_up(stat_sem);
 
+		/*
+		 * Mark this write/trim job as completed before starting verify
+		 */
+		if (td->shared_verify_table && (td_write(td) || td_trim(td)))
+			atomic_fetch_add(&td->shared_verify_table->write_jobs_done, 1);
+
 		if (td->error || td->terminate)
 			break;
 
@@ -2112,12 +2118,6 @@ static void *thread_main(void *data)
 		    o->verify == VERIFY_NONE ||
 		    td_ioengine_flagged(td, FIO_UNIDIR))
 			continue;
-
-		/*
-		 * Mark this write/trim job as completed before starting verify
-		 */
-		if (td->shared_verify_table && (td_write(td) || td_trim(td)))
-			atomic_fetch_add(&td->shared_verify_table->write_jobs_done, 1);
 
 		/*
 		 * If using shared verify table, only one job should verify.
