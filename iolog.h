@@ -276,19 +276,13 @@ struct io_piece {
 /*
  * Shared verify table for multiple jobs
  */
-#define VERIFY_TABLE_HASH_BITS 10
-#define VERIFY_TABLE_HASH_SIZE (1 << VERIFY_TABLE_HASH_BITS)
 #define MAX_VERIFY_TABLES 256
 
-struct verify_table_bucket {
-	pthread_mutex_t lock;
-	struct rb_root tree;
-	unsigned long count;
-} __attribute__((aligned(64)));
+struct skiplist;  /* Forward declaration */
 
 struct shared_verify_table {
 	int table_id;
-	struct verify_table_bucket buckets[VERIFY_TABLE_HASH_SIZE];
+	struct skiplist *skiplist;     /* Single lock-free skiplist for all entries */
 	atomic_ulong total_entries;
 	atomic_ullong shared_numberio;
 	atomic_int verify_done;

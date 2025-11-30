@@ -16,6 +16,7 @@
 #include "lib/hweight.h"
 #include "lib/pattern.h"
 #include "oslib/asprintf.h"
+#include "skiplist.h"
 
 #include "crc/md5.h"
 #include "crc/crc64.h"
@@ -1981,8 +1982,7 @@ int get_next_verify_shared(struct thread_data *td, struct io_u *io_u)
 {
 	struct shared_verify_table *table = td->shared_verify_table;
 	struct io_piece *ipo = NULL;
-	struct fio_rb_node *n;
-	int i;
+	struct skiplist_node *node;
 
 	if (!table)
 		return 1;
@@ -1993,45 +1993,34 @@ int get_next_verify_shared(struct thread_data *td, struct io_u *io_u)
 	if (io_u->file)
 		return 0;
 
+	/* Use skiplist to get first entry */
+	node = skiplist_first(table->skiplist);
+	if (!node)
+		goto out;
+
+	ipo = (struct io_piece *)node->data;
+	if (!ipo)
+		goto out;
+
 	/*
-	 * Scan all buckets to find the first available entry
-	 * This is simple but not the most efficient - we could optimize
-	 * by tracking which buckets have entries
+	 * Ensure that the associated IO has completed
 	 */
-	for (i = 0; i < VERIFY_TABLE_HASH_SIZE; i++) {
-		struct verify_table_bucket *bucket = &table->buckets[i];
+	if (atomic_load_acquire(&ipo->flags) & IP_F_IN_FLIGHT) {
+		ipo = NULL;
+		goto out;
+	}
 
-		if (bucket->count == 0)
-			continue;
-
-		pthread_mutex_lock(&bucket->lock);
-
-		n = rb_first(&bucket->tree);
-		if (!n) {
-			pthread_mutex_unlock(&bucket->lock);
-			continue;
-		}
-
-		ipo = rb_entry(n, struct io_piece, rb_node);
-
-		/*
-		 * Ensure that the associated IO has completed
-		 */
-		if (atomic_load_acquire(&ipo->flags) & IP_F_IN_FLIGHT) {
-			pthread_mutex_unlock(&bucket->lock);
-			ipo = NULL;
-			continue;
-		}
-
-		rb_erase(n, &bucket->tree);
-		bucket->count--;
+	/* Delete from skiplist (lock-free) */
+	if (skiplist_delete_node(table->skiplist, node) == 0) {
 		atomic_fetch_sub(&table->total_entries, 1);
-		pthread_mutex_unlock(&bucket->lock);
-
 		assert(ipo->flags & IP_F_ONRB);
 		ipo->flags &= ~IP_F_ONRB;
-		break;
+	} else {
+		/* Another thread deleted it */
+		ipo = NULL;
 	}
+
+out:
 
 	if (ipo) {
 		struct fio_file *resolved_file;

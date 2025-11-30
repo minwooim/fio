@@ -21,6 +21,7 @@
 #include "blktrace.h"
 #include "pshared.h"
 #include "lib/roundup.h"
+#include "skiplist.h"
 
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -1978,22 +1979,9 @@ void fio_writeout_logs(bool unit_logs)
 static struct shared_verify_table *shared_verify_tables[MAX_VERIFY_TABLES];
 static pthread_mutex_t shared_verify_lock = PTHREAD_MUTEX_INITIALIZER;
 
-static inline unsigned int verify_hash(struct fio_file *f, uint64_t offset)
-{
-	uint64_t h;
-
-	/* Use pre-computed file_name_hash for performance */
-	h = f->file_name_hash;
-
-	/* Combine with offset for better distribution */
-	h ^= (offset >> 12);
-	return hash_long(h, VERIFY_TABLE_HASH_BITS);
-}
-
 struct shared_verify_table *get_shared_verify_table(int table_id)
 {
 	struct shared_verify_table *table;
-	int i;
 
 	if (table_id <= 0 || table_id >= MAX_VERIFY_TABLES)
 		return NULL;
@@ -2017,10 +2005,13 @@ struct shared_verify_table *get_shared_verify_table(int table_id)
 		atomic_init(&table->write_jobs_done, 0);
 		pthread_mutex_init(&table->ref_lock, NULL);
 
-		for (i = 0; i < VERIFY_TABLE_HASH_SIZE; i++) {
-			pthread_mutex_init(&table->buckets[i].lock, NULL);
-			table->buckets[i].tree = RB_ROOT;
-			table->buckets[i].count = 0;
+		/* Initialize single lock-free skiplist for all entries */
+		table->skiplist = skiplist_new();
+		if (!table->skiplist) {
+			pthread_mutex_destroy(&table->ref_lock);
+			sfree(table);
+			pthread_mutex_unlock(&shared_verify_lock);
+			return NULL;
 		}
 		shared_verify_tables[table_id] = table;
 	}
@@ -2035,9 +2026,7 @@ struct shared_verify_table *get_shared_verify_table(int table_id)
 
 void put_shared_verify_table(struct shared_verify_table *table)
 {
-	struct io_piece *ipo;
-	struct fio_rb_node *n;
-	int i, should_free = 0;
+	int should_free = 0;
 
 	if (!table)
 		return;
@@ -2053,18 +2042,10 @@ void put_shared_verify_table(struct shared_verify_table *table)
 
 	pthread_mutex_lock(&shared_verify_lock);
 
-	/* Free all entries in all buckets */
-	for (i = 0; i < VERIFY_TABLE_HASH_SIZE; i++) {
-		pthread_mutex_lock(&table->buckets[i].lock);
-
-		while ((n = rb_first(&table->buckets[i].tree)) != NULL) {
-			ipo = rb_entry(n, struct io_piece, rb_node);
-			rb_erase(n, &table->buckets[i].tree);
-			free_io_piece(ipo);
-		}
-
-		pthread_mutex_unlock(&table->buckets[i].lock);
-		pthread_mutex_destroy(&table->buckets[i].lock);
+	/* Free skiplist */
+	if (table->skiplist) {
+		skiplist_free(table->skiplist);
+		table->skiplist = NULL;
 	}
 
 	pthread_mutex_destroy(&table->ref_lock);
@@ -2077,11 +2058,9 @@ void put_shared_verify_table(struct shared_verify_table *table)
 bool log_io_piece_shared(struct thread_data *td, struct io_u *io_u)
 {
 	struct shared_verify_table *table = td->shared_verify_table;
-	struct verify_table_bucket *bucket;
-	struct fio_rb_node **p, *parent;
-	struct io_piece *ipo, *__ipo;
-	unsigned int bucket_idx;
-	int overlap;
+	struct io_piece *ipo;
+	struct skiplist_node *overlap_node;
+	int backoff = 0;
 
 	if (!table)
 		return true;
@@ -2110,63 +2089,53 @@ bool log_io_piece_shared(struct thread_data *td, struct io_u *io_u)
 	else if (io_u->flags & IO_U_F_ERRORED)
 		ipo->flags |= IP_F_ERRORED;
 
-	bucket_idx = verify_hash(io_u->file, io_u->offset);
-	bucket = &table->buckets[bucket_idx];
+	/*
+	 * Use lock-free skiplist for concurrent insertion.
+	 * Handle overlaps by detecting and deleting them before insert.
+	 * Retry indefinitely with exponential backoff.
+	 */
+	while (1) {
+		/* Check for overlapping ranges */
+		overlap_node = skiplist_search_overlap(table->skiplist,
+		                                        io_u->offset, io_u->buflen);
 
-	RB_CLEAR_NODE(&ipo->rb_node);
+		if (overlap_node) {
+			struct io_piece *overlap_ipo = (struct io_piece *)overlap_node->data;
 
-	pthread_mutex_lock(&bucket->lock);
-
-restart:
-	p = &bucket->tree.rb_node;
-	parent = NULL;
-	overlap = 0;
-
-	while (*p) {
-		parent = *p;
-		__ipo = rb_entry(parent, struct io_piece, rb_node);
-
-		/* Compare by cached file_name_hash for performance */
-		if (ipo->file_name_hash < __ipo->file_name_hash)
-			p = &(*p)->rb_left;
-		else if (ipo->file_name_hash > __ipo->file_name_hash)
-			p = &(*p)->rb_right;
-		else if (ipo->offset < __ipo->offset) {
-			p = &(*p)->rb_left;
-			overlap = ipo->offset + ipo->len > __ipo->offset;
-		} else if (ipo->offset > __ipo->offset) {
-			p = &(*p)->rb_right;
-			overlap = __ipo->offset + __ipo->len > ipo->offset;
-		} else {
-			overlap = 1;
-		}
-
-		if (overlap) {
 			/* If previous write is still in-flight, serialize by returning busy */
-			if (atomic_load_acquire(&__ipo->flags) & IP_F_IN_FLIGHT) {
-				pthread_mutex_unlock(&bucket->lock);
+			if (overlap_ipo && (atomic_load_acquire(&overlap_ipo->flags) & IP_F_IN_FLIGHT)) {
 				free_io_piece(ipo);
 				io_u->ipo = NULL;
 				return false;  /* Caller should return FIO_Q_BUSY */
 			}
 
-			/* Previous write completed, safe to replace */
-			bucket->count--;
-			rb_erase(parent, &bucket->tree);
-			remove_trim_entry(td, __ipo);
-			free_io_piece(__ipo);
-			goto restart;
+			/* Previous write completed, safe to delete and replace */
+			if (skiplist_delete_node(table->skiplist, overlap_node) == 0) {
+				if (overlap_ipo) {
+					remove_trim_entry(td, overlap_ipo);
+					free_io_piece(overlap_ipo);
+				}
+				atomic_fetch_sub(&table->total_entries, 1);
+			}
+			/* Continue to retry insert */
+		}
+
+		/* Try to insert into skiplist */
+		if (skiplist_insert(table->skiplist, io_u->offset, io_u->buflen, ipo) == 0) {
+			/* Success! */
+			ipo->flags |= IP_F_ONRB;  /* Reuse flag to indicate in skiplist */
+			atomic_fetch_add(&table->total_entries, 1);
+			return true;
+		}
+
+		/* Insert failed (overlap detected by skiplist_insert), retry with backoff */
+		if (backoff < 1000) {
+			/* Exponential backoff up to 1000 iterations */
+			for (volatile int i = 0; i < backoff; i++)
+				;
+			backoff = backoff ? backoff * 2 : 1;
 		}
 	}
-
-	rb_link_node(&ipo->rb_node, parent, p);
-	rb_insert_color(&ipo->rb_node, &bucket->tree);
-	ipo->flags |= IP_F_ONRB;
-	bucket->count++;
-	atomic_fetch_add(&table->total_entries, 1);
-
-	pthread_mutex_unlock(&bucket->lock);
-	return true;
 }
 
 void unlog_io_piece_shared(struct thread_data *td, struct io_u *io_u)
@@ -2190,17 +2159,11 @@ void unlog_io_piece_shared(struct thread_data *td, struct io_u *io_u)
 
 	if (ipo->flags & IP_F_ONRB) {
 		struct shared_verify_table *table = td->shared_verify_table;
-		struct verify_table_bucket *bucket;
-		unsigned int bucket_idx;
 
-		bucket_idx = verify_hash(io_u->file, io_u->offset);
-		bucket = &table->buckets[bucket_idx];
-
-		pthread_mutex_lock(&bucket->lock);
-		rb_erase(&ipo->rb_node, &bucket->tree);
-		bucket->count--;
-		atomic_fetch_sub(&table->total_entries, 1);
-		pthread_mutex_unlock(&bucket->lock);
+		/* Use lock-free skiplist delete */
+		if (skiplist_delete(table->skiplist, io_u->offset) == 0) {
+			atomic_fetch_sub(&table->total_entries, 1);
+		}
 
 		ipo->flags &= ~IP_F_ONRB;
 	}
