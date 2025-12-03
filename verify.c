@@ -1688,6 +1688,45 @@ struct all_io_list *get_all_io_list(int save_mask, size_t *sz)
 	*sz = sizeof(*rep);
 	*sz += nr * sizeof(struct thread_io_list);
 	*sz += depth * sizeof(struct inflight_write);
+
+	/* Add space for skiplist entries (saved_io_piece + filenames) */
+	/* Only save once per shared_verify_table (by first job) */
+	for_each_td(td) {
+		if (save_mask != IO_LIST_ALL && (__td_index + 1) != save_mask)
+			continue;
+		if (td->shared_verify_table) {
+			struct shared_verify_table *table = td->shared_verify_table;
+			struct skiplist_node *node;
+			int min_index = __td_index;
+			int i;
+
+			/* Find minimum thread index using this table_id */
+			for (i = 0; i < thread_number; i++) {
+				struct thread_data *td2 = tnumber_to_td(i);
+				if (td2->shared_verify_table &&
+				    td2->shared_verify_table->table_id == table->table_id &&
+				    i < min_index) {
+					min_index = i;
+				}
+			}
+
+			/* Only the job with minimum index saves skiplist */
+			if (__td_index == min_index) {
+				for (node = skiplist_first(table->skiplist); node; node = skiplist_next(table->skiplist, node)) {
+					struct io_piece *ipo = (struct io_piece *)node->data;
+					/*
+					 * Safety check: should not happen since we wait for all
+					 * write jobs to complete before saving state
+					 */
+					if (!ipo || !ipo->file_name)
+						continue;
+					*sz += sizeof(struct saved_io_piece);
+					*sz += strlen(ipo->file_name) + 1;
+				}
+			}
+		}
+	} end_for_each();
+
 	rep = calloc(1, *sz);
 
 	rep->threads = cpu_to_le64((uint64_t) nr);
@@ -1695,15 +1734,88 @@ struct all_io_list *get_all_io_list(int save_mask, size_t *sz)
 	next = &rep->state[0];
 	for_each_td(td) {
 		struct thread_io_list *s = next;
+		uint32_t skiplist_count = 0;
+		char *ptr, *start_ptr;
 
 		if (save_mask != IO_LIST_ALL && (__td_index + 1) != save_mask)
 			continue;
 
-		for (int i = 0; i < td->o.iodepth; i++)
-			s->inflight[i].numberio = cpu_to_le64(atomic_load_acquire(&td->inflight_numberio[i]));
+		/* Handle shared_verify_table */
+		if (td->shared_verify_table) {
+			struct shared_verify_table *table = td->shared_verify_table;
+			struct skiplist_node *node;
+			int min_index = __td_index;
+			int i;
 
-		s->depth = cpu_to_le32((uint32_t) td->o.iodepth);
-		s->numberio = cpu_to_le64((uint64_t) atomic_load_acquire(&td->inflight_issued));
+			/* Find minimum thread index using this table_id */
+			for (i = 0; i < thread_number; i++) {
+				struct thread_data *td2 = tnumber_to_td(i);
+				if (td2->shared_verify_table &&
+				    td2->shared_verify_table->table_id == table->table_id &&
+				    i < min_index) {
+					min_index = i;
+				}
+			}
+
+			/* Set depth to 0 for shared table (no inflight array) */
+			s->depth = 0;
+			s->numberio = cpu_to_le64(atomic_load(&table->shared_numberio));
+
+			/* Only the job with minimum index saves skiplist */
+			if (__td_index == min_index) {
+				/* Save skiplist entries after the inflight array (which is empty) */
+				ptr = (char *)&s->inflight[0];
+				start_ptr = ptr;
+
+				for (node = skiplist_first(table->skiplist); node; node = skiplist_next(table->skiplist, node)) {
+					struct io_piece *ipo = (struct io_piece *)node->data;
+					struct saved_io_piece *saved;
+					size_t name_len;
+
+					/*
+					 * Safety check: should not happen since we wait for all
+					 * write jobs to complete before saving state
+					 */
+					if (!ipo || !ipo->file_name)
+						continue;
+
+					saved = (struct saved_io_piece *)ptr;
+					name_len = strlen(ipo->file_name) + 1;
+
+					saved->offset = cpu_to_le64(ipo->offset);
+					saved->numberio = cpu_to_le64(ipo->numberio);
+					saved->len = cpu_to_le32(ipo->len);
+					saved->flags = cpu_to_le32(ipo->flags);
+					saved->file_name_hash = cpu_to_le64(ipo->file_name_hash);
+
+					printf("save: %d [%llu, %llu + %lu), numberio=%d, flags=%#x, file_name=%s\n",
+							gettid(), ipo->offset, ipo->offset, ipo->len, ipo->numberio, ipo->flags, ipo->file_name);
+
+					ptr += sizeof(struct saved_io_piece);
+					memcpy(ptr, ipo->file_name, name_len);
+					ptr += name_len;
+
+					skiplist_count++;
+				}
+
+				s->skiplist_count = cpu_to_le32(skiplist_count);
+				s->skiplist_data_size = cpu_to_le32((uint32_t)(ptr - start_ptr));
+			} else {
+				/* Not the first job, don't save skiplist */
+				s->skiplist_count = 0;
+				s->skiplist_data_size = 0;
+			}
+		} else {
+			/* Non-shared table: save inflight array */
+			for (int i = 0; i < td->o.iodepth; i++)
+				s->inflight[i].numberio = cpu_to_le64(atomic_load_acquire(&td->inflight_numberio[i]));
+
+			s->depth = cpu_to_le32((uint32_t) td->o.iodepth);
+			s->skiplist_count = 0;
+			s->skiplist_data_size = 0;
+			s->numberio = cpu_to_le64((uint64_t) atomic_load_acquire(&td->inflight_issued));
+		}
+
 		s->index = cpu_to_le64((uint64_t) __td_index);
 		if (td->random_state.use64) {
 			s->rand.state64.s[0] = cpu_to_le64(td->random_state.state64.s1);
@@ -1833,6 +1945,8 @@ void verify_assign_state(struct thread_data *td, void *p)
 
 	s->depth = le32_to_cpu(s->depth);
 	s->numberio = le64_to_cpu(s->numberio);
+	s->skiplist_count = le32_to_cpu(s->skiplist_count);
+	s->skiplist_data_size = le32_to_cpu(s->skiplist_data_size);
 	s->rand.use64 = le64_to_cpu(s->rand.use64);
 
 	if (s->rand.use64) {
@@ -1849,6 +1963,80 @@ void verify_assign_state(struct thread_data *td, void *p)
 	}
 
 	td->vstate = p;
+}
+
+/*
+ * Load saved io_pieces from verify state into shared_verify_table skiplist.
+ * Called after shared_verify_table is initialized.
+ */
+void verify_load_state_skiplist(struct thread_data *td)
+{
+	struct thread_io_list *s = td->vstate;
+	struct shared_verify_table *table = td->shared_verify_table;
+	char *ptr;
+	int i, loaded = 0;
+
+	if (!s || !table || s->skiplist_count == 0)
+		return;
+
+	ptr = (char *)&s->inflight[s->depth];
+
+	for (i = 0; i < s->skiplist_count; i++) {
+		struct saved_io_piece *saved = (struct saved_io_piece *)ptr;
+		struct io_piece *ipo;
+		char *file_name;
+		size_t name_len;
+		uint64_t offset, numberio, file_name_hash;
+		uint32_t len, flags;
+
+		/* Convert endianness to local variables */
+		offset = le64_to_cpu(saved->offset);
+		numberio = le64_to_cpu(saved->numberio);
+		len = le32_to_cpu(saved->len);
+		flags = le32_to_cpu(saved->flags);
+		file_name_hash = le64_to_cpu(saved->file_name_hash);
+
+		/* Get filename */
+		ptr += sizeof(struct saved_io_piece);
+		file_name = ptr;
+		name_len = strlen(file_name) + 1;
+		ptr += name_len;
+
+		/* Create io_piece */
+		ipo = calloc(1, sizeof(struct io_piece));
+		if (!ipo)
+			break;
+
+		init_ipo(ipo);
+		ipo->offset = offset;
+		ipo->numberio = numberio;
+		ipo->len = len;
+		ipo->flags = flags & ~IP_F_IN_FLIGHT;  /* Not in-flight anymore */
+		ipo->file_name_hash = file_name_hash;
+		ipo->file_name = smalloc_strdup(file_name);
+
+		if (!ipo->file_name) {
+			free(ipo);
+			break;
+		}
+
+		printf("%d load: [%llu, %llu + %lu), numberio=%d, flags=%#x, file_name=%s\n",
+				gettid(), ipo->offset, ipo->offset, ipo->len, ipo->numberio, ipo->flags, ipo->file_name);
+		/* Insert into skiplist */
+		if (skiplist_insert(table->skiplist, ipo->offset, ipo->len, ipo) == 0) {
+			ipo->flags |= IP_F_ONRB;
+			atomic_fetch_add(&table->total_entries, 1);
+			loaded++;
+		} else {
+			assert(false);
+			sfree(ipo->file_name);
+			free(ipo);
+		}
+	}
+
+	skiplist_print(table->skiplist);
+
+	log_info("fio: loaded %d io_pieces into skiplist from verify state\n", loaded);
 }
 
 int verify_state_hdr(struct verify_state_hdr *hdr, struct thread_io_list *s)
@@ -1881,8 +2069,13 @@ int verify_load_state(struct thread_data *td, const char *prefix)
 		return 0;
 
 	fd = open_state_file(td->o.name, prefix, td->thread_number - 1, 0);
-	if (fd == -1)
+	if (fd == -1) {
+		/* For shared_verify_table, only the first job has a state file.
+		 * Other jobs will share the skiplist, so missing state file is OK */
+		if (td->o.verify_table_id > 0)
+			return 0;
 		return 1;
+	}
 
 	ret = read(fd, &hdr, sizeof(hdr));
 	if (ret != sizeof(hdr)) {
@@ -2001,6 +2194,9 @@ int get_next_verify_shared(struct thread_data *td, struct io_u *io_u)
 	ipo = (struct io_piece *)node->data;
 	if (!ipo)
 		goto out;
+
+	printf("pop: [%llu, %llu + %lu), numberio=%d, flags=%#x, file_name=%s\n",
+			ipo->offset, ipo->offset, ipo->len, ipo->numberio, ipo->flags, ipo->file_name);
 
 	/*
 	 * Ensure that the associated IO has completed

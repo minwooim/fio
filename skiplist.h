@@ -85,6 +85,12 @@ uint64_t skiplist_count(struct skiplist *list);
 struct skiplist_node *skiplist_first(struct skiplist *list);
 
 /*
+ * Get the next node after the given node (for iteration)
+ * Returns NULL if no more nodes
+ */
+struct skiplist_node *skiplist_next(struct skiplist *list, struct skiplist_node *node);
+
+/*
  * Print skiplist structure (for debugging)
  */
 void skiplist_print(struct skiplist *list);

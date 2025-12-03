@@ -487,9 +487,27 @@ struct skiplist_node *skiplist_first(struct skiplist *list)
 	return first;
 }
 
+struct skiplist_node *skiplist_next(struct skiplist *list, struct skiplist_node *node)
+{
+	struct skiplist_node *next;
+
+	if (!list || !node)
+		return NULL;
+
+	next = get_unmarked(atomic_load(&node->forward[0]));
+
+	/* Skip marked (deleted) nodes */
+	while (next && is_marked(atomic_load(&next->forward[0]))) {
+		next = get_unmarked(atomic_load(&next->forward[0]));
+	}
+
+	return next;
+}
+
 /*
  * Print skiplist structure (for debugging)
  */
+#include "iolog.h"
 void skiplist_print(struct skiplist *list)
 {
 	struct skiplist_node *header;
@@ -501,15 +519,17 @@ void skiplist_print(struct skiplist *list)
 	header = atomic_load(&list->header);
 	current = get_unmarked(atomic_load(&header->forward[0]));
 
-	printf("Skiplist (count=%llu, max_level=%d):\n",
-	       (unsigned long long)atomic_load(&list->count), atomic_load(&list->max_level));
+	printf("%d Skiplist (count=%llu, max_level=%d):\n",
+	       gettid(), (unsigned long long)atomic_load(&list->count), atomic_load(&list->max_level));
 
 	while (current) {
-		printf("  [%llu, %llu) level=%d data=%p marked=%d\n",
+		struct io_piece *ipo = current->data;
+
+		printf("  [%llu, %llu) level=%d numberio=%llu marked=%d\n",
 		       (unsigned long long)current->offset,
 		       (unsigned long long)(current->offset + current->length),
 		       current->level,
-		       current->data,
+		       ipo->numberio,
 		       is_marked(atomic_load(&current->forward[0])) ? 1 : 0);
 
 		current = get_unmarked(atomic_load(&current->forward[0]));

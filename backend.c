@@ -1196,9 +1196,9 @@ static void do_io(struct thread_data *td, uint64_t *bytes_done)
 		 * completed.
 		 */
 		if (((td_write(td) && io_u->ddir == DDIR_WRITE) || io_u->ddir == DDIR_TRIM) &&
-		    td->o.do_verify &&
 		    td->o.verify != VERIFY_NONE &&
-		    !td->o.experimental_verify) {
+		    !td->o.experimental_verify &&
+		    (td->o.do_verify || td->shared_verify_table)) {
 			if (!log_io_piece(td, io_u)) {
 				dprint(FD_IO, "Overlap detected, skipping...\n");
 				invalidate_inflight(td, io_u);
@@ -1818,8 +1818,11 @@ static void *thread_main(void *data)
 			goto err;
 		}
 
-		if ((td_write(td) || td_trim(td)) && o->do_verify)
+		if ((td_write(td) || td_trim(td)))
 			atomic_fetch_add(&td->shared_verify_table->write_jobs_active, 1);
+
+		/* Load saved skiplist data from verify state if available */
+		verify_load_state_skiplist(td);
 	}
 
 	td_set_runstate(td, TD_INITIALIZED);
@@ -2098,7 +2101,8 @@ static void *thread_main(void *data)
 		fio_gettime(&td->start, NULL);
 		fio_sem_up(stat_sem);
 
-		if (td->shared_verify_table && (td_write(td) || td_trim(td)))
+		if (td->shared_verify_table && td->o.do_verify &&
+				(td_write(td) || td_trim(td)))
 			atomic_fetch_add(&td->shared_verify_table->write_jobs_done, 1);
 
 		if (td->error || td->terminate)
@@ -2119,6 +2123,8 @@ static void *thread_main(void *data)
 
 			if (!atomic_compare_exchange_strong(&td->shared_verify_table->verify_done, &expected, 1))
 				continue;
+
+			skiplist_print(td->shared_verify_table->skiplist);
 		}
 
 		clear_io_state(td, 0);
@@ -2173,8 +2179,44 @@ static void *thread_main(void *data)
 	}
 
 	if (td->o.verify_state_save && !(td->flags & TD_F_VSTATE_SAVED) &&
-	    (td->o.verify != VERIFY_NONE && td_write(td)))
-		verify_save_state(td->thread_number);
+	    (td->o.verify != VERIFY_NONE && !td->o.verify_only &&
+	     (td_write(td) || td_trim(td)))) {
+		/* For shared_verify_table, only the first job saves state */
+		if (td->shared_verify_table) {
+			struct shared_verify_table *table = td->shared_verify_table;
+			int min_index = td->thread_number - 1;
+			int i;
+
+			/* Signal this write job is done */
+			atomic_fetch_add(&table->write_jobs_done, 1);
+
+			/* Find minimum thread index using this table_id */
+			for (i = 0; i < thread_number; i++) {
+				struct thread_data *td2 = tnumber_to_td(i);
+				if (td2->shared_verify_table &&
+				    td2->shared_verify_table->table_id == table->table_id &&
+				    i < min_index) {
+					min_index = i;
+				}
+			}
+
+			/* Only save if this is the first job for this table */
+			if ((td->thread_number - 1) == min_index) {
+				int active, done;
+
+				/* Wait for all write jobs to complete before saving state */
+				active = atomic_load(&table->write_jobs_active);
+				while ((done = atomic_load(&table->write_jobs_done)) < active) {
+					usleep(1000);  /* Sleep 1ms */
+				}
+
+				printf("All %d write jobs completed, saving verify state\n", active);
+				verify_save_state(td->thread_number);
+			}
+		} else {
+			verify_save_state(td->thread_number);
+		}
+	}
 
 	fio_unpin_memory(td);
 

@@ -2069,6 +2069,7 @@ bool log_io_piece_shared(struct thread_data *td, struct io_u *io_u)
 	ipo->file_name_hash = io_u->file->file_name_hash;
 	ipo->file_name = smalloc_strdup(io_u->file->file_name);
 	if (!ipo->file_name) {
+		assert(false);
 		free_io_piece(ipo);
 		io_u->ipo = NULL;
 		return false;
@@ -2120,6 +2121,7 @@ bool log_io_piece_shared(struct thread_data *td, struct io_u *io_u)
 				       (unsigned long long)(io_u->offset + io_u->buflen));
 				if (overlap_ipo) {
 					remove_trim_entry(td, overlap_ipo);
+					// printf("%d, ipo %p: overlap\n", gettid(), overlap_ipo);
 					free_io_piece(overlap_ipo);
 				}
 				atomic_fetch_sub(&table->total_entries, 1);

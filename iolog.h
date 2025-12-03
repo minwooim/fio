@@ -399,6 +399,7 @@ static inline void free_io_piece(struct io_piece *ipo)
 	if (ipo->file_name) {
 		sfree(ipo->file_name);
 		ipo->file_name = NULL;
+		// printf("%d, ipo %p: file_name = NULL\n", gettid(), ipo);
 	}
 
 	free(ipo);
