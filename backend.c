@@ -2042,8 +2042,8 @@ static void *thread_main(void *data)
 
 		prune_io_piece_log(td);
 
-		if (td->o.verify_only && td_write(td)) {
-			if (!td->shared_verify_table)
+		if (td->o.verify_only && (td_write(td) || td_trim(td))) {
+			if (!td->shared_verify_table && td_write(td))
 				verify_bytes = do_dry_run(td);
 			else
 				verify_bytes = atomic_load(&td->shared_verify_table->total_entries) * td->o.bs[DDIR_WRITE];
