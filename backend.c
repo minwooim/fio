@@ -1152,7 +1152,16 @@ static void do_io(struct thread_data *td, uint64_t *bytes_done)
 				populate_verify_io_u(td, io_u);
 				log_inflight(td, io_u);
 			}
+	} else if (io_u->ddir == DDIR_TRIM && td->flags & TD_F_DO_VERIFY) {
+		if (!(io_u->flags & IO_U_F_PATTERN_DONE)) {
+			io_u_set(td, io_u, IO_U_F_PATTERN_DONE);
+			if (td->shared_verify_table)
+				io_u->numberio = atomic_fetch_add(&td->shared_verify_table->shared_numberio, 1);
+			else
+				io_u->numberio = td->io_issues[io_u->ddir];
+			log_inflight(td, io_u);
 		}
+	}
 
 		ddir = io_u->ddir;
 
