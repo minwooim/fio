@@ -2034,8 +2034,6 @@ void verify_load_state_skiplist(struct thread_data *td)
 		}
 	}
 
-	skiplist_print(table->skiplist);
-
 	log_info("fio: loaded %d io_pieces into skiplist from verify state\n", loaded);
 }
 

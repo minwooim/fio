@@ -2042,9 +2042,12 @@ static void *thread_main(void *data)
 
 		prune_io_piece_log(td);
 
-		if (td->o.verify_only && td_write(td))
-			verify_bytes = do_dry_run(td);
-		else {
+		if (td->o.verify_only && td_write(td)) {
+			if (!td->shared_verify_table)
+				verify_bytes = do_dry_run(td);
+			else
+				verify_bytes = atomic_load(&td->shared_verify_table->total_entries) * td->o.bs[DDIR_WRITE];
+		} else {
 			if (!td->o.rand_repeatable)
 				/* save verify rand state to replay hdr seeds later at verify */
 				frand_copy(&td->verify_state_last_do_io, &td->verify_state);
@@ -2122,9 +2125,7 @@ static void *thread_main(void *data)
 			int expected = 0;
 
 			if (!atomic_compare_exchange_strong(&td->shared_verify_table->verify_done, &expected, 1))
-				continue;
-
-			skiplist_print(td->shared_verify_table->skiplist);
+				break;
 		}
 
 		clear_io_state(td, 0);

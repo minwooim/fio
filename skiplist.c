@@ -519,8 +519,8 @@ void skiplist_print(struct skiplist *list)
 	header = atomic_load(&list->header);
 	current = get_unmarked(atomic_load(&header->forward[0]));
 
-	printf("%d Skiplist (count=%llu, max_level=%d):\n",
-	       gettid(), (unsigned long long)atomic_load(&list->count), atomic_load(&list->max_level));
+	printf("Skiplist (count=%llu, max_level=%d):\n",
+	       (unsigned long long)atomic_load(&list->count), atomic_load(&list->max_level));
 
 	while (current) {
 		struct io_piece *ipo = current->data;
