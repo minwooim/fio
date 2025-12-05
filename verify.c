@@ -1788,9 +1788,6 @@ struct all_io_list *get_all_io_list(int save_mask, size_t *sz)
 					saved->flags = cpu_to_le32(ipo->flags);
 					saved->file_name_hash = cpu_to_le64(ipo->file_name_hash);
 
-					printf("save: %d [%llu, %llu + %lu), numberio=%d, flags=%#x, file_name=%s\n",
-							gettid(), ipo->offset, ipo->offset, ipo->len, ipo->numberio, ipo->flags, ipo->file_name);
-
 					ptr += sizeof(struct saved_io_piece);
 					memcpy(ptr, ipo->file_name, name_len);
 					ptr += name_len;
@@ -2020,8 +2017,6 @@ void verify_load_state_skiplist(struct thread_data *td)
 			break;
 		}
 
-		printf("%d load: [%llu, %llu + %lu), numberio=%d, flags=%#x, file_name=%s\n",
-				gettid(), ipo->offset, ipo->offset, ipo->len, ipo->numberio, ipo->flags, ipo->file_name);
 		/* Insert into skiplist */
 		if (skiplist_insert(table->skiplist, ipo->offset, ipo->len, ipo) == 0) {
 			ipo->flags |= IP_F_ONRB;
@@ -2192,9 +2187,6 @@ int get_next_verify_shared(struct thread_data *td, struct io_u *io_u)
 	ipo = (struct io_piece *)node->data;
 	if (!ipo)
 		goto out;
-
-	printf("pop: [%llu, %llu + %lu), numberio=%d, flags=%#x, file_name=%s\n",
-			ipo->offset, ipo->offset, ipo->len, ipo->numberio, ipo->flags, ipo->file_name);
 
 	/*
 	 * Ensure that the associated IO has completed
