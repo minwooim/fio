@@ -573,24 +573,30 @@ static enum fio_q_status io_u_submit(struct thread_data *td, struct io_u *io_u)
 	return td_io_queue(td, io_u);
 }
 /*
- * Check if this is the first job for the given shared verify table
+ * Check if this is the first job for the given verify table ID
  */
-static bool is_first_job_for_table(struct thread_data *td,
-				   struct shared_verify_table *table)
+static bool is_first_job_for_table_id(struct thread_data *td, int table_id)
 {
 	int min_index = td->thread_number - 1;
 	int i;
 
 	for (i = 0; i < thread_number; i++) {
 		struct thread_data *td2 = tnumber_to_td(i);
-		if (td2->shared_verify_table &&
-		    td2->shared_verify_table->table_id == table->table_id &&
-		    i < min_index) {
+		if (td2->o.verify_table_id == table_id && i < min_index) {
 			min_index = i;
 		}
 	}
 
 	return (td->thread_number - 1) == min_index;
+}
+
+/*
+ * Check if this is the first job for the given shared verify table
+ */
+static bool is_first_job_for_table(struct thread_data *td,
+				   struct shared_verify_table *table)
+{
+	return is_first_job_for_table_id(td, table->table_id);
 }
 
 /*
@@ -1842,8 +1848,13 @@ static void *thread_main(void *data)
 		if ((td_write(td) || td_trim(td)))
 			atomic_fetch_add(&td->shared_verify_table->write_jobs_active, 1);
 
-		/* Load saved skiplist data from verify state if available */
-		verify_load_state_skiplist(td);
+		/*
+		 * Load saved skiplist data from verify state if available.
+		 * Only the first job for this table should load to avoid
+		 * duplicate load attempts and error messages.
+		 */
+		if (is_first_job_for_table(td, td->shared_verify_table))
+			verify_load_state_skiplist(td);
 	}
 
 	td_set_runstate(td, TD_INITIALIZED);
@@ -2455,6 +2466,16 @@ static int fio_verify_load_state(struct thread_data *td)
 	int ret;
 
 	if (!td->o.verify_state)
+		return 0;
+
+	/*
+	 * For shared verify tables, only the first job should load state
+	 * to avoid duplicate load attempts and error messages.
+	 * Use verify_table_id instead of shared_verify_table pointer since
+	 * this function may be called before shared_verify_table is initialized.
+	 */
+	if (td->o.verify_table_id > 0 &&
+	    !is_first_job_for_table_id(td, td->o.verify_table_id))
 		return 0;
 
 	if (is_backend) {

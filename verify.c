@@ -2062,8 +2062,12 @@ int verify_load_state(struct thread_data *td, const char *prefix)
 
 	fd = open_state_file(td->o.name, prefix, td->thread_number - 1, 0);
 	if (fd == -1) {
-		/* For shared_verify_table, only the first job has a state file.
-		 * Other jobs will share the skiplist, so missing state file is OK */
+		/*
+		 * For shared_verify_table, missing state file is expected
+		 * for non-first jobs (they will share the loaded skiplist).
+		 * The error message from open_state_file is already printed,
+		 * but this is harmless - just return success.
+		 */
 		if (td->o.verify_table_id > 0)
 			return 0;
 		return 1;
