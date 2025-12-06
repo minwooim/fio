@@ -1794,7 +1794,6 @@ int add_file(struct thread_data *td, const char *fname, int numjob, int inc)
 	char file_name[PATH_MAX];
 	struct fio_file *f;
 	int len = 0;
-	uint64_t hash = 0;
 
 	dprint(FD_FILE, "add file %s\n", fname);
 
@@ -1849,13 +1848,11 @@ int add_file(struct thread_data *td, const char *fname, int numjob, int inc)
 	assert(f->file_name);
 
 	/*
-	 * Get hashed value from the file name.
+	 * Get hashed value from the file name using djb2 algorithm
 	 */
-	while (*fname) {
-		hash = (hash << 5) - hash + *fname;
-		fname++;
-	}
-	f->file_name_hash = hash;
+	f->file_name_hash = 0;
+	for (const char *p = f->file_name; *p; p++)
+		f->file_name_hash = (f->file_name_hash << 5) - f->file_name_hash + *p;
 
 	if (td->o.filetype)
 		f->filetype = td->o.filetype;

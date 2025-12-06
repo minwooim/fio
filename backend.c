@@ -572,6 +572,26 @@ static enum fio_q_status io_u_submit(struct thread_data *td, struct io_u *io_u)
 
 	return td_io_queue(td, io_u);
 }
+/*
+ * Check if this is the first job for the given shared verify table
+ */
+static bool is_first_job_for_table(struct thread_data *td,
+				   struct shared_verify_table *table)
+{
+	int min_index = td->thread_number - 1;
+	int i;
+
+	for (i = 0; i < thread_number; i++) {
+		struct thread_data *td2 = tnumber_to_td(i);
+		if (td2->shared_verify_table &&
+		    td2->shared_verify_table->table_id == table->table_id &&
+		    i < min_index) {
+			min_index = i;
+		}
+	}
+
+	return (td->thread_number - 1) == min_index;
+}
 
 /*
  * The main verify engine. Runs over the writes we previously submitted,
@@ -591,9 +611,8 @@ static void do_verify(struct thread_data *td, uint64_t verify_bytes)
 	 */
 	if (td->shared_verify_table) {
 		int active = atomic_load(&td->shared_verify_table->write_jobs_active);
-		int done = atomic_load(&td->shared_verify_table->write_jobs_done);
 
-		if (active > 0 && done < active) {
+		if (active > 0) {
 			while (atomic_load(&td->shared_verify_table->write_jobs_done) < active) {
 				usleep(10000);
 				if (td->terminate)
@@ -1142,26 +1161,19 @@ static void do_io(struct thread_data *td, uint64_t *bytes_done)
 			break;
 		}
 
-		if (io_u->ddir == DDIR_WRITE && td->flags & TD_F_DO_VERIFY) {
+		if ((io_u->ddir == DDIR_WRITE || io_u->ddir == DDIR_TRIM) &&
+		    td->flags & TD_F_DO_VERIFY) {
 			if (!(io_u->flags & IO_U_F_PATTERN_DONE)) {
 				io_u_set(td, io_u, IO_U_F_PATTERN_DONE);
 				if (td->shared_verify_table)
 					io_u->numberio = atomic_fetch_add(&td->shared_verify_table->shared_numberio, 1);
 				else
 					io_u->numberio = td->io_issues[io_u->ddir];
-				populate_verify_io_u(td, io_u);
+				if (io_u->ddir == DDIR_WRITE)
+					populate_verify_io_u(td, io_u);
 				log_inflight(td, io_u);
 			}
-	} else if (io_u->ddir == DDIR_TRIM && td->flags & TD_F_DO_VERIFY) {
-		if (!(io_u->flags & IO_U_F_PATTERN_DONE)) {
-			io_u_set(td, io_u, IO_U_F_PATTERN_DONE);
-			if (td->shared_verify_table)
-				io_u->numberio = atomic_fetch_add(&td->shared_verify_table->shared_numberio, 1);
-			else
-				io_u->numberio = td->io_issues[io_u->ddir];
-			log_inflight(td, io_u);
 		}
-	}
 
 		ddir = io_u->ddir;
 
@@ -2194,31 +2206,18 @@ static void *thread_main(void *data)
 		/* For shared_verify_table, only the first job saves state */
 		if (td->shared_verify_table) {
 			struct shared_verify_table *table = td->shared_verify_table;
-			int min_index = td->thread_number - 1;
-			int i;
 
 			/* Signal this write job is done */
 			atomic_fetch_add(&table->write_jobs_done, 1);
 
-			/* Find minimum thread index using this table_id */
-			for (i = 0; i < thread_number; i++) {
-				struct thread_data *td2 = tnumber_to_td(i);
-				if (td2->shared_verify_table &&
-				    td2->shared_verify_table->table_id == table->table_id &&
-				    i < min_index) {
-					min_index = i;
-				}
-			}
-
 			/* Only save if this is the first job for this table */
-			if ((td->thread_number - 1) == min_index) {
-				int active, done;
+			if (is_first_job_for_table(td, table)) {
+				int active;
 
 				/* Wait for all write jobs to complete before saving state */
 				active = atomic_load(&table->write_jobs_active);
-				while ((done = atomic_load(&table->write_jobs_done)) < active) {
+				while (atomic_load(&table->write_jobs_done) < active)
 					usleep(1000);  /* Sleep 1ms */
-				}
 
 				verify_save_state(td->thread_number);
 			}
