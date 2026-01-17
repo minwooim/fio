@@ -238,6 +238,15 @@ static bool fio_io_sync(struct thread_data *td, struct fio_file *f)
 	io_u->file = f;
 	io_u_set(td, io_u, IO_U_F_NO_FILE_PUT);
 
+	if (td->shared_verify_table) {
+		uint64_t new_epoch = atomic_fetch_add(&td->shared_verify_table->current_flush_epoch, 1) + 1;
+		io_u->flush_epoch = new_epoch;
+
+		/* Mark all completed writes with this flush epoch */
+		mark_completed_writes_flushed(td, new_epoch);
+	} else
+		io_u->flush_epoch = 0;
+
 	if (td_io_prep(td, io_u)) {
 		put_io_u(td, io_u);
 		return true;

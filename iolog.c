@@ -2003,6 +2003,8 @@ struct shared_verify_table *get_shared_verify_table(int table_id)
 		atomic_init(&table->verify_done, 0);
 		atomic_init(&table->write_jobs_active, 0);
 		atomic_init(&table->write_jobs_done, 0);
+		atomic_init(&table->current_flush_epoch, 0);
+		atomic_init(&table->max_successful_flush_epoch, 0);
 		pthread_mutex_init(&table->ref_lock, NULL);
 
 		table->skiplist = skiplist_new();

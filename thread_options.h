@@ -10,6 +10,11 @@
 #include "lib/pattern.h"
 #include "td_error.h"
 
+enum verify_policy {
+	VERIFY_POLICY_DEFAULT	= 0,
+	VERIFY_POLICY_FLUSH	= 1,
+};
+
 enum fio_zone_mode {
 	ZONE_MODE_NOT_SPECIFIED	= 0,
 	ZONE_MODE_NONE		= 1,
@@ -161,7 +166,9 @@ struct thread_options {
 	unsigned int verify_write_sequence;
 	unsigned int verify_header_seed;
 	unsigned int verify_table_id;
+	unsigned int verify_policy;
 	unsigned int pad_verify;
+	unsigned int pad_verify2;
 	unsigned int use_thread;
 	unsigned int unlink;
 	unsigned int unlink_each_loop;
@@ -499,7 +506,9 @@ struct thread_options_pack {
 	uint32_t verify_write_sequence;
 	uint32_t verify_header_seed;
 	uint32_t verify_table_id;
+	uint32_t verify_policy;
 	uint32_t pad_verify;
+	uint32_t pad_verify2;
 	uint32_t use_thread;
 	uint32_t unlink;
 	uint32_t unlink_each_loop;

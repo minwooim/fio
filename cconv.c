@@ -185,6 +185,8 @@ int convert_thread_options_to_cpu(struct thread_options *o,
 	o->verify_offset = le32_to_cpu(top->verify_offset);
 	o->verify_write_sequence = le32_to_cpu(top->verify_write_sequence);
 	o->verify_header_seed = le32_to_cpu(top->verify_header_seed);
+	o->verify_table_id = le32_to_cpu(top->verify_table_id);
+	o->verify_policy = le32_to_cpu(top->verify_policy);
 
 	o->verify_pattern_bytes = le32_to_cpu(top->verify_pattern_bytes);
 	o->verify_pattern_interval = le32_to_cpu(top->verify_pattern_interval);
@@ -453,6 +455,8 @@ void convert_thread_options_to_net(struct thread_options_pack *top,
 	top->verify_offset = cpu_to_le32(o->verify_offset);
 	top->verify_write_sequence = cpu_to_le32(o->verify_write_sequence);
 	top->verify_header_seed = cpu_to_le32(o->verify_header_seed);
+	top->verify_table_id = cpu_to_le32(o->verify_table_id);
+	top->verify_policy = cpu_to_le32(o->verify_policy);
 	top->verify_pattern_bytes = cpu_to_le32(o->verify_pattern_bytes);
 	top->verify_pattern_interval = cpu_to_le32(o->verify_pattern_interval);
 	top->verify_fatal = cpu_to_le32(o->verify_fatal);

@@ -271,6 +271,8 @@ struct io_piece {
 	unsigned int file_action;
 	uint64_t file_name_hash;
 	char *file_name;
+
+	atomic_ullong fsync_epoch;
 };
 
 /*
@@ -296,6 +298,8 @@ struct shared_verify_table {
 	 */
 	atomic_int write_jobs_active;
 	atomic_int write_jobs_done;
+
+	atomic_ullong fsync_epoch;
 } __attribute__((aligned(8)));
 
 /*
@@ -322,6 +326,7 @@ extern void put_shared_verify_table(struct shared_verify_table *table);
 extern bool log_io_piece_shared(struct thread_data *, struct io_u *);
 extern void unlog_io_piece_shared(struct thread_data *, struct io_u *);
 extern int get_next_verify_shared(struct thread_data *, struct io_u *);
+extern void mark_completed_writes_flushed(struct thread_data *, uint64_t);
 extern void prune_io_piece_log(struct thread_data *);
 extern void write_iolog_close(struct thread_data *);
 int64_t iolog_items_to_fetch(struct thread_data *td);
@@ -389,6 +394,7 @@ static inline void init_ipo(struct io_piece *ipo)
 	INIT_FLIST_HEAD(&ipo->trim_list);
 	ipo->file_name = NULL;
 	ipo->file_name_hash = 0;
+	atomic_store(&ipo->fsync_epoch, 0);
 }
 
 static inline void free_io_piece(struct io_piece *ipo)

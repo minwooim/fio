@@ -131,6 +131,8 @@ struct io_u {
 	uint32_t dtype;
 	uint32_t dspec;
 
+	uint64_t flush_epoch;
+
 	union {
 #ifdef CONFIG_LIBAIO
 		struct iocb iocb;

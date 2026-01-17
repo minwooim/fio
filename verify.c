@@ -2199,6 +2199,21 @@ int get_next_verify_shared(struct thread_data *td, struct io_u *io_u)
 		goto out;
 	}
 
+	if (td->o.verify_policy == VERIFY_POLICY_FLUSH) {
+		uint64_t epoch = atomic_load(&ipo->fsync_epoch);
+		uint64_t max_success = atomic_load(&table->max_successful_flush_epoch);
+
+		/*
+		 * Skip if:
+		 * - epoch == 0: not flushed at all
+		 * - epoch > max_success: flush failed or not completed
+		 */
+		if (epoch == 0 || epoch > max_success) {
+			ipo = NULL;
+			goto out;
+		}
+	}
+
 	/* Delete from skiplist (lock-free) */
 	if (skiplist_delete_node(table->skiplist, node) == 0) {
 		atomic_fetch_sub(&table->total_entries, 1);

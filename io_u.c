@@ -1755,6 +1755,7 @@ again:
 		assert(!(td->flags & TD_F_CHILD));
 		io_u_set(td, io_u, IO_U_F_IN_CUR_DEPTH);
 		io_u->ipo = NULL;
+		io_u->flush_epoch = 0;
 	} else if (td_async_processing(td)) {
 		int ret;
 		/*
@@ -2138,6 +2139,10 @@ static void io_completed(struct thread_data *td, struct io_u **io_u_ptr,
 		if (io_u->error)
 			unlog_io_piece(td, io_u);
 		else {
+			if (td->shared_verify_table) {
+				io_u->ipo->fsync_epoch =
+					atomic_load_acquire(&td->shared_verify_table->fsync_epoch);
+			}
 			atomic_store_release(&io_u->ipo->flags,
 					io_u->ipo->flags & ~IP_F_IN_FLIGHT);
 		}
