@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
@@ -187,11 +188,8 @@ static int reset_timers(struct interval_timer timer[], int num_timers,
  */
 static uint8_t wait_for_action(int fd, unsigned int timeout_ms)
 {
-	struct timeval timeout = {
-		.tv_sec  = timeout_ms / 1000,
-		.tv_usec = (timeout_ms % 1000) * 1000,
-	};
-	fd_set rfds, efds;
+	struct pollfd pfd[2];
+	int nfds = 1;
 	uint8_t action = 0;
 	uint64_t exp;
 	int res;
@@ -199,37 +197,40 @@ static uint8_t wait_for_action(int fd, unsigned int timeout_ms)
 	res = read_from_pipe(fd, &action, sizeof(action));
 	if (res > 0 || timeout_ms == 0)
 		return action;
-	FD_ZERO(&rfds);
-	FD_SET(fd, &rfds);
-	FD_ZERO(&efds);
-	FD_SET(fd, &efds);
+
+	pfd[0].fd = fd;
+	pfd[0].events = POLLIN;
+	pfd[0].revents = 0;
+
 #ifdef CONFIG_HAVE_TIMERFD_CREATE
 	{
 		/*
-		 * If the timer frequency is 100 Hz, select() will round up
-		 * `timeout` to the next multiple of 1 / 100 Hz = 10 ms. Hence
-		 * use a high-resolution timer if possible to increase
-		 * select() timeout accuracy.
+		 * If the timer frequency is 100 Hz, poll() will round up
+		 * the timeout to the next multiple of 1 / 100 Hz = 10 ms.
+		 * Hence use a high-resolution timer if possible to increase
+		 * timeout accuracy.
 		 */
 		struct itimerspec delta = {};
 
-		delta.it_value.tv_sec = timeout.tv_sec;
-		delta.it_value.tv_nsec = timeout.tv_usec * 1000;
+		delta.it_value.tv_sec = timeout_ms / 1000;
+		delta.it_value.tv_nsec = (timeout_ms % 1000) * 1000000;
 		res = timerfd_settime(timerfd, 0, &delta, NULL);
 		assert(res == 0);
-		FD_SET(timerfd, &rfds);
+		pfd[1].fd = timerfd;
+		pfd[1].events = POLLIN;
+		pfd[1].revents = 0;
+		nfds = 2;
 	}
 #endif
-	res = select(max(fd, timerfd) + 1, &rfds, NULL, &efds,
-		     timerfd >= 0 ? NULL : &timeout);
+	res = poll(pfd, nfds, timerfd >= 0 ? -1 : (int)timeout_ms);
 	if (res < 0) {
-		log_err("fio: select() call in helper thread failed: %s",
+		log_err("fio: poll() call in helper thread failed: %s",
 			strerror(errno));
 		return A_EXIT;
 	}
-	if (FD_ISSET(fd, &rfds))
+	if (pfd[0].revents & (POLLIN | POLLERR))
 		read_from_pipe(fd, &action, sizeof(action));
-	if (timerfd >= 0 && FD_ISSET(timerfd, &rfds)) {
+	if (timerfd >= 0 && (pfd[1].revents & POLLIN)) {
 		res = read(timerfd, &exp, sizeof(exp));
 		assert(res == sizeof(exp));
 	}
