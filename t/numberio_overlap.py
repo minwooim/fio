@@ -8,21 +8,23 @@
 # time.  fio_offset_overlap_risk() must return true so that io_hist uses an
 # rb-tree and retains only the latest io_piece per offset.
 #
-# Grouped by rw mode → verify style (offline/online) → engine (async/sync):
+# Each TC is run twice: once with the async engine and once with the sync
+# engine selected based on the platform (Linux: io_uring/psync,
+# Windows: windowsaio/sync, other: posixaio/psync).
 #
-# rw=write     offline  TC  1- 2: basic 2× overlap, io_uring + psync
-#              online   TC  3- 4: do_verify=1, io_uring + psync
+# rw=write     offline  TC 1: basic 2× overlap
+#              online   TC 2: do_verify=1
 #
-# rw=randwrite offline  TC  5- 6: norandommap, io_uring + psync
-#              online   TC  7- 8: norandommap, io_uring + psync
+# rw=randwrite offline  TC 3: norandommap
+#              online   TC 4: norandommap
 #
-# rw=rw        offline  TC  9-10: io_uring + psync
-#              online   TC 11-12: io_uring + psync
+# rw=rw        offline  TC 5
+#              online   TC 6
 #
-# rw=randrw    offline  TC 13-14: norandommap, io_uring + psync
-#              online   TC 15-16: norandommap, io_uring + psync
+# rw=randrw    offline  TC 7: norandommap
+#              online   TC 8: norandommap
 #
-# filesize<size offline  TC 17-18: rb-tree triggered before first I/O
+# filesize<size offline  TC 9: rb-tree triggered before first I/O
 #
 # USAGE
 # see python3 t/numberio_overlap.py --help
@@ -33,10 +35,11 @@
 #
 # REQUIREMENTS
 # Python 3.6
-# Linux, io_uring
 #
 """
+import copy
 import os
+import platform
 import sys
 import json
 import time
@@ -462,18 +465,15 @@ class OnlineOverlapVerifyTest(FioJobCmdTest):
 
 TEST_LIST = [
     # ══════════════════════════════════════════════════════════════════
-    # rw=write  (TC 1-6)
+    # rw=write  (TC 1-2)
     # ══════════════════════════════════════════════════════════════════
 
-    # ------------------------------------------------------------------
-    # write, offline (TC 1-2): basic 2× overlap (io_size = 2 × size)
-    # ------------------------------------------------------------------
+    # write, offline (TC 1): basic 2× overlap (io_size = 2 × size)
+    # 8 blocks written twice; verify reads each once.
     {
-        # io_uring, 2× overlap: 8 blocks written twice; verify reads each once.
         "test_id": 1,
         "fio_opts": {
             "filename": None,            # filled in from --file at runtime
-            "ioengine": "io_uring",
             "bs": "128k",
             "size":    1 * 1024 * 1024,  # 1 MiB
             "io_size": 2 * 1024 * 1024,  # 2 MiB  →  2× overlap
@@ -482,48 +482,15 @@ TEST_LIST = [
         "test_class": OfflineOverlapVerifyTest,
         "success": SUCCESS_DEFAULT,
     },
-    {
-        # psync, 2× overlap.
-        "test_id": 2,
-        "fio_opts": {
-            "filename": None,
-            "ioengine": "psync",
-            "bs": "128k",
-            "size":    1 * 1024 * 1024,
-            "io_size": 2 * 1024 * 1024,
-            "verify": "crc32c",
-        },
-        "test_class": OfflineOverlapVerifyTest,
-        "success": SUCCESS_DEFAULT,
-    },
 
-    # ------------------------------------------------------------------
-    # write, online (TC 3-4)
-    # Write and verify happen in the same fio job (--do_verify=1).
+    # write, online (TC 2): do_verify=1, 2× overlap.
     # Exercises the backend.c fix (total_bytes bounded by io_size for
     # sequential write-only jobs) and the io_u.c fix (last_pos wrap
     # triggered by do_verify=1, not only verify_only=1).
-    # ------------------------------------------------------------------
     {
-        # io_uring, online verify, 2× overlap: write io_size=2M, verify size=1M.
-        "test_id": 3,
+        "test_id": 2,
         "fio_opts": {
             "filename": None,
-            "ioengine": "io_uring",
-            "bs": "128k",
-            "size":    1 * 1024 * 1024,
-            "io_size": 2 * 1024 * 1024,
-            "verify": "crc32c",
-        },
-        "test_class": OnlineOverlapVerifyTest,
-        "success": SUCCESS_DEFAULT,
-    },
-    {
-        # psync, online verify, 2× overlap.
-        "test_id": 4,
-        "fio_opts": {
-            "filename": None,
-            "ioengine": "psync",
             "bs": "128k",
             "size":    1 * 1024 * 1024,
             "io_size": 2 * 1024 * 1024,
@@ -534,38 +501,18 @@ TEST_LIST = [
     },
 
     # ══════════════════════════════════════════════════════════════════
-    # rw=randwrite  (TC 5-8)
+    # rw=randwrite  (TC 3-4)
     # norandommap=1 allows the RNG to revisit the same offsets (genuine
     # write overlap) and avoids the axmap-full problem in do_dry_run.
     # Both offline and online phases use fio's default randrepeat=1, so
     # write and verify dry-run see the same random offset sequence.
     # ══════════════════════════════════════════════════════════════════
 
-    # ------------------------------------------------------------------
-    # randwrite, offline (TC 5-6)
-    # ------------------------------------------------------------------
+    # randwrite, offline (TC 3): norandommap, offline verify.
     {
-        # io_uring, randwrite, norandommap, offline verify.
-        "test_id": 5,
+        "test_id": 3,
         "fio_opts": {
             "filename": None,
-            "ioengine": "io_uring",
-            "rw": "randwrite",
-            "bs": "128k",
-            "size":       1 * 1024 * 1024,
-            "io_size":    2 * 1024 * 1024,
-            "norandommap": True,
-            "verify": "crc32c",
-        },
-        "test_class": OfflineOverlapVerifyTest,
-        "success": SUCCESS_DEFAULT,
-    },
-    {
-        # psync, randwrite, norandommap, offline verify.
-        "test_id": 6,
-        "fio_opts": {
-            "filename": None,
-            "ioengine": "psync",
             "rw": "randwrite",
             "bs": "128k",
             "size":       1 * 1024 * 1024,
@@ -577,35 +524,15 @@ TEST_LIST = [
         "success": SUCCESS_DEFAULT,
     },
 
-    # ------------------------------------------------------------------
-    # randwrite, online (TC 9-10)
-    # norandommap=1: total_bytes=io_size so the full 2M is written in one
-    # do_io() call; random offsets may be revisited (genuine overlap).
+    # randwrite, online (TC 4): norandommap, online verify.
+    # total_bytes=io_size so the full 2M is written in one do_io() call;
+    # random offsets may be revisited (genuine overlap).
     # verify_errors==0 and written==io_size are asserted; read_bytes is
     # skipped because random sampling may not cover every block.
-    # ------------------------------------------------------------------
     {
-        # io_uring, online verify, randwrite, norandommap.
-        "test_id": 7,
+        "test_id": 4,
         "fio_opts": {
             "filename": None,
-            "ioengine": "io_uring",
-            "rw": "randwrite",
-            "bs": "128k",
-            "size":       1 * 1024 * 1024,
-            "io_size":    2 * 1024 * 1024,
-            "norandommap": True,
-            "verify": "crc32c",
-        },
-        "test_class": OnlineOverlapVerifyTest,
-        "success": SUCCESS_DEFAULT,
-    },
-    {
-        # psync, online verify, randwrite, norandommap.
-        "test_id": 8,
-        "fio_opts": {
-            "filename": None,
-            "ioengine": "psync",
             "rw": "randwrite",
             "bs": "128k",
             "size":       1 * 1024 * 1024,
@@ -618,39 +545,19 @@ TEST_LIST = [
     },
 
     # ══════════════════════════════════════════════════════════════════
-    # rw=rw (sequential mixed read/write)  (TC 9-12)
+    # rw=rw (sequential mixed read/write)  (TC 5-6)
     # io_size=4×size; with 50/50 rwmix the write fraction gives overlap.
     # total_bytes=size per outer iteration → 4 iters → write overlap.
     # Only verify_errors==0 is asserted; byte-count assertions skipped
     # because write.io_bytes < io_size and read.io_bytes merges phases.
     # ══════════════════════════════════════════════════════════════════
 
-    # ------------------------------------------------------------------
-    # rw=rw, offline (TC 9-10)
-    # Both phases use rw=rw so the dry-run produces the same
-    # offset→numberio mapping (writes at even-numbered offsets only).
-    # ------------------------------------------------------------------
+    # rw=rw, offline (TC 5): both phases use rw=rw so the dry-run produces
+    # the same offset→numberio mapping (writes at even-numbered offsets only).
     {
-        # io_uring, rw=rw, write overlap (4 outer iters, ~half blocks written).
-        "test_id": 9,
+        "test_id": 5,
         "fio_opts": {
             "filename": None,
-            "ioengine": "io_uring",
-            "rw": "rw",
-            "bs": "128k",
-            "size":    1 * 1024 * 1024,
-            "io_size": 4 * 1024 * 1024,
-            "verify": "crc32c",
-        },
-        "test_class": OfflineOverlapVerifyTest,
-        "success": SUCCESS_DEFAULT,
-    },
-    {
-        # psync, rw=rw, write overlap.
-        "test_id": 10,
-        "fio_opts": {
-            "filename": None,
-            "ioengine": "psync",
             "rw": "rw",
             "bs": "128k",
             "size":    1 * 1024 * 1024,
@@ -661,30 +568,11 @@ TEST_LIST = [
         "success": SUCCESS_DEFAULT,
     },
 
-    # ------------------------------------------------------------------
-    # rw=rw, online (TC 11-12)
-    # ------------------------------------------------------------------
+    # rw=rw, online (TC 6).
     {
-        # io_uring, online verify, rw=rw, write overlap.
-        "test_id": 11,
+        "test_id": 6,
         "fio_opts": {
             "filename": None,
-            "ioengine": "io_uring",
-            "rw": "rw",
-            "bs": "128k",
-            "size":    1 * 1024 * 1024,
-            "io_size": 4 * 1024 * 1024,
-            "verify": "crc32c",
-        },
-        "test_class": OnlineOverlapVerifyTest,
-        "success": SUCCESS_DEFAULT,
-    },
-    {
-        # psync, online verify, rw=rw, write overlap.
-        "test_id": 12,
-        "fio_opts": {
-            "filename": None,
-            "ioengine": "psync",
             "rw": "rw",
             "bs": "128k",
             "size":    1 * 1024 * 1024,
@@ -696,38 +584,18 @@ TEST_LIST = [
     },
 
     # ══════════════════════════════════════════════════════════════════
-    # rw=randrw (random mixed read/write)  (TC 13-16)
+    # rw=randrw (random mixed read/write)  (TC 7-8)
     # norandommap=1 allows offsets to be revisited (genuine overlap) and
     # avoids the axmap-full problem in do_dry_run (offline) / do_io (online).
     # fio's default randrepeat=1 ensures both phases replay the same mixed
     # I/O sequence so the dry-run io_hist matches the write phase.
     # ══════════════════════════════════════════════════════════════════
 
-    # ------------------------------------------------------------------
-    # randrw, offline (TC 13-14)
-    # ------------------------------------------------------------------
+    # randrw, offline (TC 7): norandommap, offline verify.
     {
-        # io_uring, randrw, norandommap, offline verify.
-        "test_id": 13,
+        "test_id": 7,
         "fio_opts": {
             "filename": None,
-            "ioengine": "io_uring",
-            "rw": "randrw",
-            "bs": "128k",
-            "size":       1 * 1024 * 1024,
-            "io_size":    4 * 1024 * 1024,
-            "norandommap": True,
-            "verify": "crc32c",
-        },
-        "test_class": OfflineOverlapVerifyTest,
-        "success": SUCCESS_DEFAULT,
-    },
-    {
-        # psync, randrw, norandommap, offline verify.
-        "test_id": 14,
-        "fio_opts": {
-            "filename": None,
-            "ioengine": "psync",
             "rw": "randrw",
             "bs": "128k",
             "size":       1 * 1024 * 1024,
@@ -739,34 +607,12 @@ TEST_LIST = [
         "success": SUCCESS_DEFAULT,
     },
 
-    # ------------------------------------------------------------------
-    # randrw, online (TC 15-16)
-    # norandommap=1: same reason as TC 13-14 — allows genuine overlap
-    # within a single do_io() call (total_bytes = io_size).
+    # randrw, online (TC 8): norandommap, online verify.
     # Only verify_errors==0 is asserted.
-    # ------------------------------------------------------------------
     {
-        # io_uring, online verify, randrw, norandommap.
-        "test_id": 15,
+        "test_id": 8,
         "fio_opts": {
             "filename": None,
-            "ioengine": "io_uring",
-            "rw": "randrw",
-            "bs": "128k",
-            "size":       1 * 1024 * 1024,
-            "io_size":    4 * 1024 * 1024,
-            "norandommap": True,
-            "verify": "crc32c",
-        },
-        "test_class": OnlineOverlapVerifyTest,
-        "success": SUCCESS_DEFAULT,
-    },
-    {
-        # psync, online verify, randrw, norandommap.
-        "test_id": 16,
-        "fio_opts": {
-            "filename": None,
-            "ioengine": "psync",
             "rw": "randrw",
             "bs": "128k",
             "size":       1 * 1024 * 1024,
@@ -779,41 +625,23 @@ TEST_LIST = [
     },
 
     # ══════════════════════════════════════════════════════════════════
-    # filesize < size  (TC 17-18)
+    # filesize < size  (TC 9)
     # Real file size smaller than size=: fio_offset_overlap_risk() returns
     # true (io_size > real_file_size) so the rb-tree is used even before
     # the first write.  Covers the case where the rb-tree is initialised
     # at setup time rather than at the first overlap.
     # ══════════════════════════════════════════════════════════════════
 
-    # ------------------------------------------------------------------
-    # write, offline, filesize < size (TC 17-18)
-    # ------------------------------------------------------------------
+    # write, offline, filesize < size (TC 9):
+    # filesize=512k < size=1M, io_size=2M → 2× overlap over 1M.
     {
-        # io_uring, filesize=512k < size=1M, io_size=2M → 2× overlap over 1M.
-        "test_id": 17,
+        "test_id": 9,
         "fio_opts": {
             "filename": None,
-            "ioengine": "io_uring",
             "bs": "128k",
             "filesize": 512 * 1024,      # initial file size (< size)
             "size":    1 * 1024 * 1024,  # 1 MiB  >  filesize
             "io_size": 2 * 1024 * 1024,  # 2 MiB  →  io_size > size → rb-tree
-            "verify": "crc32c",
-        },
-        "test_class": OfflineOverlapVerifyTest,
-        "success": SUCCESS_DEFAULT,
-    },
-    {
-        # psync, filesize=512k < size=1M, io_size=2M → 2× overlap over 1M.
-        "test_id": 18,
-        "fio_opts": {
-            "filename": None,
-            "ioengine": "psync",
-            "bs": "128k",
-            "filesize": 512 * 1024,
-            "size":    1 * 1024 * 1024,
-            "io_size": 2 * 1024 * 1024,
             "verify": "crc32c",
         },
         "test_class": OfflineOverlapVerifyTest,
@@ -866,15 +694,37 @@ def main():
     for test in TEST_LIST:
         test['fio_opts']['filename'] = args.file
 
-    test_env = {
-        'fio_path':      fio_path,
-        'fio_root':      fio_root,
-        'artifact_root': artifact_root,
-        'basename':      'numberio-overlap',
-    }
+    if platform.system() == 'Linux':
+        async_engine = 'io_uring'
+        sync_engine = 'psync'
+    elif platform.system() == 'Windows':
+        async_engine = 'windowsaio'
+        sync_engine = 'sync'
+    else:
+        async_engine = 'posixaio'
+        sync_engine = 'psync'
 
-    _, failed, _ = run_fio_tests(TEST_LIST, test_env, args)
-    sys.exit(failed)
+    total_failed = 0
+    for engine in [async_engine, sync_engine]:
+        engine_tests = copy.deepcopy(TEST_LIST)
+        for test in engine_tests:
+            test['fio_opts']['ioengine'] = engine
+
+        engine_artifact = os.path.join(artifact_root, engine)
+        os.mkdir(engine_artifact)
+
+        test_env = {
+            'fio_path':      fio_path,
+            'fio_root':      fio_root,
+            'artifact_root': engine_artifact,
+            'basename':      'numberio-overlap',
+        }
+
+        print(f"\nRunning with ioengine={engine}")
+        _, failed, _ = run_fio_tests(engine_tests, test_env, args)
+        total_failed += failed
+
+    sys.exit(total_failed)
 
 
 if __name__ == '__main__':
