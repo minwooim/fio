@@ -594,7 +594,7 @@ static int gen_eta_str(struct jobs_eta *je, char *p, size_t left,
 void display_thread_status(struct jobs_eta *je)
 {
 	static struct timespec disp_eta_new_line;
-	static int eta_new_line_init, eta_new_line_pending;
+	static int eta_new_line_init;
 	static int linelen_last;
 	static int eta_good;
 	char output[__THREAD_RUNSTR_SZ(REAL_MAX_JOBS) + 512], *p = output;
@@ -604,12 +604,6 @@ void display_thread_status(struct jobs_eta *je)
 	if (je->eta_sec != INT_MAX && je->elapsed_sec) {
 		perc = (double) je->elapsed_sec / (double) (je->elapsed_sec + je->eta_sec);
 		eta_to_str(eta_str, je->eta_sec);
-	}
-
-	if (eta_new_line_pending) {
-		eta_new_line_pending = 0;
-		linelen_last = 0;
-		p += sprintf(p, "\n");
 	}
 
 	p += sprintf(p, "Jobs: %d (f=%d)", je->nr_running, je->files_open);
@@ -683,18 +677,21 @@ void display_thread_status(struct jobs_eta *je)
 			free(iops_str[ddir]);
 		}
 	}
-	sprintf(p, "\r");
-
-	printf("%s", output);
-
 	if (!eta_new_line_init) {
 		fio_gettime(&disp_eta_new_line, NULL);
 		eta_new_line_init = 1;
-	} else if (eta_new_line && mtime_since_now(&disp_eta_new_line) > eta_new_line) {
-		fio_gettime(&disp_eta_new_line, NULL);
-		eta_new_line_pending = 1;
 	}
 
+	if (eta_new_line_init && eta_new_line &&
+	    mtime_since_now(&disp_eta_new_line) >= eta_new_line) {
+		fio_gettime(&disp_eta_new_line, NULL);
+		sprintf(p, "\n");
+		linelen_last = 0;
+	} else {
+		sprintf(p, "\r");
+	}
+
+	printf("%s", output);
 	fflush(stdout);
 }
 
