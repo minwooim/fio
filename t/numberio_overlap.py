@@ -12,19 +12,24 @@
 # engine selected based on the platform (Linux: io_uring/psync,
 # Windows: windowsaio/sync, other: posixaio/psync).
 #
-# rw=write     offline  TC 1: basic 2× overlap
-#              online   TC 2: do_verify=1
+# rw=write     offline  TC  1: basic 2× overlap
+#              online   TC  2: do_verify=1
 #
-# rw=randwrite offline  TC 3: norandommap
-#              online   TC 4: norandommap
+# rw=randwrite offline  TC  3: norandommap
+#              online   TC  4: norandommap
 #
-# rw=rw        offline  TC 5
-#              online   TC 6
+# rw=rw        offline  TC  5
+#              online   TC  6
 #
-# rw=randrw    offline  TC 7: norandommap
-#              online   TC 8: norandommap
+# rw=randrw    offline  TC  7: norandommap
+#              online   TC  8: norandommap
 #
-# filesize<size offline  TC 9: rb-tree triggered before first I/O
+# filesize<size offline  TC  9: rb-tree triggered before first I/O
+#
+# nrfiles=2    offline  TC 10: write, 2× overlap across 2 files
+#              online   TC 11: write, do_verify=1 across 2 files
+#              offline  TC 12: randwrite, norandommap
+#              offline  TC 13: write, filesize < size/nrfiles
 #
 # USAGE
 # see python3 t/numberio_overlap.py --help
@@ -90,6 +95,14 @@ class OfflineOverlapVerifyTest(FioJobCmdTest):
             os.mkdir(self.paths['test_dir'])
         self.parameters = []    # satisfy FioExeTest.run() if it ever gets called
 
+    def _filename_str(self):
+        """Return the fio --filename value: colon-joined list for nrfiles > 1."""
+        base = self.fio_opts['filename']
+        nrfiles = self.fio_opts.get('nrfiles', 1)
+        if nrfiles > 1:
+            return ':'.join(f"{base}.{i}" for i in range(nrfiles))
+        return base
+
     def _fio_args(self, phase):
         """Return fio CLI args for *phase* ('write' or 'verify')."""
 
@@ -106,7 +119,7 @@ class OfflineOverlapVerifyTest(FioJobCmdTest):
         rw = self.fio_opts.get('rw', 'write')
 
         common += [
-            f"--filename={self.fio_opts['filename']}",
+            f"--filename={self._filename_str()}",
             f"--bs={self.fio_opts['bs']}",
             f"--size={self.fio_opts['size']}",
             f"--io_size={self.fio_opts['io_size']}",
@@ -139,7 +152,7 @@ class OfflineOverlapVerifyTest(FioJobCmdTest):
                 "--name=overlap-verify",
                 f"--ioengine={ioengine}",
                 fallocate,
-                f"--filename={self.fio_opts['filename']}",
+                f"--filename={self._filename_str()}",
                 f"--rw={rw}",
                 f"--bs={self.fio_opts['bs']}",
                 f"--size={self.fio_opts['size']}",
@@ -177,13 +190,17 @@ class OfflineOverlapVerifyTest(FioJobCmdTest):
     def run(self):
         """Run write phase then verify phase sequentially."""
 
-        # If filesize is specified, pre-create the file at that size so that
-        # real_file_size < size, which is the scenario under test.
+        # If filesize is specified, pre-create each file at that size so that
+        # real_file_size < size/nrfiles, which is the scenario under test.
         if 'filesize' in self.fio_opts:
-            fname = self.fio_opts['filename']
-            with open(fname, 'wb'):
-                pass
-            os.truncate(fname, self.fio_opts['filesize'])
+            base = self.fio_opts['filename']
+            nrfiles = self.fio_opts.get('nrfiles', 1)
+            fnames = [f"{base}.{i}" for i in range(nrfiles)] if nrfiles > 1 \
+                else [base]
+            for fname in fnames:
+                with open(fname, 'wb'):
+                    pass
+                os.truncate(fname, self.fio_opts['filesize'])
 
         try:
             with open(self.filenames['stdout'], "w",
@@ -342,6 +359,14 @@ class OnlineOverlapVerifyTest(FioJobCmdTest):
             os.mkdir(self.paths['test_dir'])
         self.parameters = []
 
+    def _filename_str(self):
+        """Return the fio --filename value: colon-joined list for nrfiles > 1."""
+        base = self.fio_opts['filename']
+        nrfiles = self.fio_opts.get('nrfiles', 1)
+        if nrfiles > 1:
+            return ':'.join(f"{base}.{i}" for i in range(nrfiles))
+        return base
+
     def _fio_args(self):
         ioengine = self.fio_opts.get('ioengine', 'io_uring')
         rw = self.fio_opts.get('rw', 'write')
@@ -349,7 +374,7 @@ class OnlineOverlapVerifyTest(FioJobCmdTest):
             "--name=online-overlap-verify",
             f"--ioengine={ioengine}",
             "--fallocate=truncate",
-            f"--filename={self.fio_opts['filename']}",
+            f"--filename={self._filename_str()}",
             f"--rw={rw}",
             f"--bs={self.fio_opts['bs']}",
             f"--size={self.fio_opts['size']}",
@@ -642,6 +667,90 @@ TEST_LIST = [
             "filesize": 512 * 1024,      # initial file size (< size)
             "size":    1 * 1024 * 1024,  # 1 MiB  >  filesize
             "io_size": 2 * 1024 * 1024,  # 2 MiB  →  io_size > size → rb-tree
+            "verify": "crc32c",
+        },
+        "test_class": OfflineOverlapVerifyTest,
+        "success": SUCCESS_DEFAULT,
+    },
+
+    # ══════════════════════════════════════════════════════════════════
+    # Multiple files (nrfiles=2)  (TC 10-13)
+    #
+    # With nrfiles=2 fio distributes I/O across two files.  Each file
+    # receives size/2 bytes of address space and io_size/2 of I/O,
+    # giving 2× overlap per file.  fio_offset_overlap_risk() fires at
+    # the job level (io_size > size), so the rb-tree is used for the
+    # shared io_hist.  nr_done_files is reset when io_size > size so
+    # that fio continues I/O after visiting every file once.
+    #
+    # Assertions are identical to the single-file cases:
+    #   write.io_bytes == io_size   (total across both files)
+    #   read.io_bytes  == size      (one verify pass per file, total)
+    # ══════════════════════════════════════════════════════════════════
+
+    # nrfiles=2, write, offline (TC 10): basic 2× overlap across 2 files.
+    {
+        "test_id": 10,
+        "fio_opts": {
+            "filename": None,
+            "nrfiles": 2,
+            "bs": "128k",
+            "size":    1 * 1024 * 1024,  # 1 MiB total (512k per file)
+            "io_size": 2 * 1024 * 1024,  # 2 MiB total → 2× overlap per file
+            "verify": "crc32c",
+        },
+        "test_class": OfflineOverlapVerifyTest,
+        "success": SUCCESS_DEFAULT,
+    },
+
+    # nrfiles=2, write, online (TC 11): do_verify=1 across 2 files.
+    {
+        "test_id": 11,
+        "fio_opts": {
+            "filename": None,
+            "nrfiles": 2,
+            "bs": "128k",
+            "size":    1 * 1024 * 1024,
+            "io_size": 2 * 1024 * 1024,
+            "verify": "crc32c",
+        },
+        "test_class": OnlineOverlapVerifyTest,
+        "success": SUCCESS_DEFAULT,
+    },
+
+    # nrfiles=2, randwrite, norandommap, offline (TC 12).
+    # Random writes distribute across both files via file_service_type;
+    # norandommap=1 allows offsets within each file to be revisited.
+    # read.io_bytes assertion is skipped (norandommap may not cover all blocks).
+    {
+        "test_id": 12,
+        "fio_opts": {
+            "filename": None,
+            "nrfiles": 2,
+            "rw": "randwrite",
+            "bs": "128k",
+            "size":       1 * 1024 * 1024,
+            "io_size":    2 * 1024 * 1024,
+            "norandommap": True,
+            "verify": "crc32c",
+        },
+        "test_class": OfflineOverlapVerifyTest,
+        "success": SUCCESS_DEFAULT,
+    },
+
+    # nrfiles=2, write, offline, filesize < size/nrfiles (TC 13).
+    # Each file is pre-created at 256k (< size/2 = 512k), so
+    # real_file_size < size/nrfiles at setup → rb-tree initialised before
+    # the first I/O (exercises the early-init path alongside TC 9).
+    {
+        "test_id": 13,
+        "fio_opts": {
+            "filename": None,
+            "nrfiles": 2,
+            "bs": "128k",
+            "filesize": 256 * 1024,      # pre-created size per file (< size/2)
+            "size":    1 * 1024 * 1024,  # 1 MiB total → 512k per file > filesize
+            "io_size": 2 * 1024 * 1024,  # 2 MiB total → 2× overlap per file
             "verify": "crc32c",
         },
         "test_class": OfflineOverlapVerifyTest,
