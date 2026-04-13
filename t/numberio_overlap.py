@@ -665,9 +665,10 @@ def parse_args():
                         help='run only these test IDs')
     parser.add_argument('-k', '--skip-req', action='store_true',
                         help='skip requirements checking')
-    parser.add_argument('--file', required=True,
+    parser.add_argument('--file',
+                        default='/tmp/fio-numberio-overlap-test.dat',
                         help='file path for all TCs '
-                             '(e.g. /tmp/fio-overlap-test.dat). '
+                             '(default: /tmp/fio-numberio-overlap-test.dat). '
                              'WARNING: data will be overwritten',
                         dest='file')
     return parser.parse_args()
