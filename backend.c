@@ -1106,9 +1106,11 @@ static void do_io(struct thread_data *td, uint64_t *bytes_done)
 
 	/*
 	 * Don't break too early if io_size > size. The exception is when
-	 * verify is enabled.
+	 * verify is enabled, unless verify_write_sequence is set, in which
+	 * case all io_size bytes must be issued before the verify phase starts.
 	 */
-	if (td_rw(td) && !td_random(td) && td->o.verify == VERIFY_NONE)
+	if (td_rw(td) && !td_random(td) &&
+	    (td->o.verify == VERIFY_NONE || td->o.verify_write_sequence))
 		total_bytes = max(total_bytes, (uint64_t)td->o.io_size);
 
 	/*
