@@ -1676,11 +1676,30 @@ struct all_io_list *get_all_io_list(int save_mask, size_t *sz)
 		if (save_mask != IO_LIST_ALL && (__td_index + 1) != save_mask)
 			continue;
 
-		for (int i = 0; i < td->o.iodepth; i++)
-			s->inflight[i].numberio = cpu_to_le64(atomic_load_acquire(&td->inflight_numberio[i]));
+		if (td->o.verify_type == VERIFY_TYPE_FSYNC && td->safe_inflight_issued) {
+			/*
+			 * Two-buffer mode: save the active (post-fsync) buffer as
+			 * the inflight list and use the fsync snapshot as the
+			 * numberio threshold.  Writes below the threshold that were
+			 * covered by the last fsync will be verified; writes at or
+			 * above the threshold (issued after the last fsync) will be
+			 * skipped because they may not be persistent after a crash.
+			 */
+			uint64_t *active_buf = td->inflight_numberio +
+					       td->inflight_active_buf * td->o.iodepth;
+
+			for (int i = 0; i < td->o.iodepth; i++)
+				s->inflight[i].numberio = cpu_to_le64(atomic_load_acquire(&active_buf[i]));
+
+			s->numberio = cpu_to_le64(td->safe_inflight_issued);
+		} else {
+			for (int i = 0; i < td->o.iodepth; i++)
+				s->inflight[i].numberio = cpu_to_le64(atomic_load_acquire(&td->inflight_numberio[i]));
+
+			s->numberio = cpu_to_le64((uint64_t) atomic_load_acquire(&td->inflight_issued));
+		}
 
 		s->depth = cpu_to_le32((uint32_t) td->o.iodepth);
-		s->numberio = cpu_to_le64((uint64_t) atomic_load_acquire(&td->inflight_issued));
 		s->index = cpu_to_le64((uint64_t) __td_index);
 		if (td->offset_state.use64) {
 			s->rand.state64.s[0] = cpu_to_le64(td->offset_state.state64.s1);
