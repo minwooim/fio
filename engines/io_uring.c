@@ -891,6 +891,21 @@ static enum fio_q_status fio_ioring_queue(struct thread_data *td,
 		return FIO_Q_BUSY;
 
 	/*
+	 * For io_uring_cmd with verify_type=fsync, the flush must not be
+	 * submitted while writes are still in flight. The NVMe device does
+	 * not guarantee ordering between a flush and concurrent writes in its
+	 * internal queue, so all prior writes must have completed at the
+	 * device level before the flush is issued. Return BUSY to let fio
+	 * drain in-flight ops; fio will retry the flush once the queue is
+	 * empty.
+	 */
+	if (ddir_sync(io_u->ddir) && ld->is_uring_cmd_eng &&
+	    td->o.verify_type == VERIFY_TYPE_FSYNC &&
+	    (ld->queued ||
+	     td->io_issues[DDIR_WRITE] != td->io_blocks[DDIR_WRITE]))
+		return FIO_Q_BUSY;
+
+	/*
 	 * If this is a syncfs request, or if async trim has been tried and
 	 * failed, punt to sync.
 	 * */
