@@ -900,10 +900,19 @@ static enum fio_q_status fio_ioring_queue(struct thread_data *td,
 	 * empty.
 	 */
 	if (ddir_sync(io_u->ddir) && ld->is_uring_cmd_eng &&
-	    td->o.verify_type == VERIFY_TYPE_FSYNC &&
-	    (ld->queued ||
-	     td->io_issues[DDIR_WRITE] != td->io_blocks[DDIR_WRITE]))
-		return FIO_Q_BUSY;
+	    td->o.verify_type == VERIFY_TYPE_FSYNC) {
+		if (ld->queued ||
+		    td->io_issues[DDIR_WRITE] != td->io_blocks[DDIR_WRITE])
+			return FIO_Q_BUSY;
+		/*
+		 * All in-flight writes have drained.  Snapshot inflight_issued
+		 * now — at the exact moment the flush SQE is submitted — so
+		 * on_fsync_completed() uses the write count that the NVMe
+		 * device actually sees before the flush, not the count at the
+		 * earlier fill_io_u() call site.
+		 */
+		io_u->numberio = atomic_load_acquire(&td->inflight_issued);
+	}
 
 	/*
 	 * If this is a syncfs request, or if async trim has been tried and
