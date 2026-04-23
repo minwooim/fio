@@ -32,6 +32,12 @@ enum {
 	VERIFY_NULL,			/* pretend to verify */
 };
 
+/* Values for the verify_type option */
+enum {
+	VERIFY_TYPE_NONE = 0,
+	VERIFY_TYPE_FSYNC = 1,	/* only verify writes covered by the last fsync */
+};
+
 /*
  * Set the high bit to distinguish versioned headers from older
  * non-versioned headers.

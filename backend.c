@@ -243,6 +243,7 @@ static bool fio_io_sync(struct thread_data *td, struct fio_file *f,
 		return true;
 
 	io_u->ddir = ddir;
+	io_u->numberio = 0;
 	io_u->file = f;
 	io_u_set(td, io_u, IO_U_F_NO_FILE_PUT);
 
@@ -989,6 +990,7 @@ static void handle_thinktime(struct thread_data *td, enum fio_ddir ddir,
  */
 void log_inflight(struct thread_data *td, struct io_u *io_u)
 {
+	uint64_t *active_buf;
 	int idx, i;
 
 	if (!td->inflight_numberio || io_u->ddir != DDIR_WRITE)
@@ -1006,21 +1008,24 @@ void log_inflight(struct thread_data *td, struct io_u *io_u)
 		abort();
 	}
 
-	/* Walk the inflight list until we find a free slot. */
+	active_buf = td->inflight_numberio + td->inflight_active_buf * td->o.iodepth;
+
+	/* Walk the active inflight buffer until we find a free slot. */
 	idx = td->next_inflight_numberio_idx;
 	for (i = 0; i < td->o.iodepth; i++) {
-		if (td->inflight_numberio[idx] == INVALID_NUMBERIO) {
+		if (active_buf[idx] == INVALID_NUMBERIO) {
 			/*
 			 * The order here is important - we must "protect" this write in the
 			 * inflight list before making it visible in inflight_issued.
 			 */
-			atomic_store_release(&td->inflight_numberio[idx], io_u->numberio);
+			atomic_store_release(&active_buf[idx], io_u->numberio);
 			td->next_inflight_numberio_idx = (idx + 1) % td->o.iodepth;
 			io_u->inflight_idx = idx;
+			io_u->inflight_buf_idx = td->inflight_active_buf;
 
 			atomic_store_release(&td->inflight_issued, io_u->numberio + 1);
-			dprint(FD_VERIFY, "log_inflight: numberio=%"PRIu64", inflight_idx=%d\n",
-				io_u->numberio, idx);
+			dprint(FD_VERIFY, "log_inflight: numberio=%"PRIu64", inflight_idx=%d, buf=%u\n",
+				io_u->numberio, idx, td->inflight_active_buf);
 			return;
 		}
 		idx = (idx + 1) % td->o.iodepth;
@@ -1036,26 +1041,30 @@ void log_inflight(struct thread_data *td, struct io_u *io_u)
  */
 void invalidate_inflight(struct thread_data *td, struct io_u *io_u)
 {
+	uint64_t *buf;
+
 	if (!td->inflight_numberio ||
 		io_u->ddir != DDIR_WRITE ||
 		io_u->inflight_idx == -1) {
 		return;
 	}
 
-	dprint(FD_VERIFY, "invalidate_inflight: numberio=%"PRIu64", inflight_idx=%d\n",
-		io_u->numberio, io_u->inflight_idx);
+	dprint(FD_VERIFY, "invalidate_inflight: numberio=%"PRIu64", inflight_idx=%d, buf=%d\n",
+		io_u->numberio, io_u->inflight_idx, io_u->inflight_buf_idx);
 
-	if (td->inflight_numberio[io_u->inflight_idx] == INVALID_NUMBERIO) {
+	buf = td->inflight_numberio + io_u->inflight_buf_idx * td->o.iodepth;
+
+	if (buf[io_u->inflight_idx] == INVALID_NUMBERIO) {
 		log_err("inflight entry already invalid: numberio=%"PRIu64", inflight_idx=%d\n",
 			io_u->numberio, io_u->inflight_idx);
 		abort();
-	} else if (td->inflight_numberio[io_u->inflight_idx] != io_u->numberio) {
+	} else if (buf[io_u->inflight_idx] != io_u->numberio) {
 		log_err("inflight entry numberio does not match: expected numberio=%"PRIu64", observed numberio=%"PRIu64", inflight_idx=%d\n",
-			io_u->numberio, td->inflight_numberio[io_u->inflight_idx], io_u->inflight_idx);
+			io_u->numberio, buf[io_u->inflight_idx], io_u->inflight_idx);
 		abort();
 	}
 
-	atomic_store_release(&td->inflight_numberio[io_u->inflight_idx], INVALID_NUMBERIO);
+	atomic_store_release(&buf[io_u->inflight_idx], INVALID_NUMBERIO);
 	io_u->inflight_idx = -1;
 }
 
@@ -1064,20 +1073,66 @@ void invalidate_inflight(struct thread_data *td, struct io_u *io_u)
  */
 void clear_inflight(struct thread_data *td)
 {
-	int i;
+	unsigned int alloc_depth, i;
 
 	if (!td->inflight_numberio)
 		return;
 
-	for (i = 0; i < td->o.iodepth; i++)
+	alloc_depth = (td->o.verify_type == VERIFY_TYPE_FSYNC) ?
+		       2 * td->o.iodepth : td->o.iodepth;
+
+	for (i = 0; i < alloc_depth; i++)
 		td->inflight_numberio[i] = INVALID_NUMBERIO;
 
+	td->inflight_active_buf = 0;
+	td->safe_inflight_issued = 0;
 	td->next_inflight_numberio_idx = 0;
 	/*
 	 * Experimental verify can increment io_issues for writes, so catch
 	 * inflight_issued up in between loops.
 	 */
 	td->inflight_issued = td->io_issues[DDIR_WRITE];
+}
+
+/*
+ * Called when an fsync completes with verify_type=fsync.  Snapshots the
+ * current inflight_issued count as the safe verification threshold and swaps
+ * to the other inflight buffer so that subsequent writes are tracked
+ * separately from the now-fsynced set.
+ */
+void on_fsync_completed(struct thread_data *td, struct io_u *io_u)
+{
+	unsigned int new_active;
+	unsigned int i;
+
+	if (td->o.verify_type != VERIFY_TYPE_FSYNC || !td->inflight_numberio)
+		return;
+
+	/*
+	 * Use the threshold captured at fsync submission time (stored in
+	 * io_u->numberio by fill_io_u).  Writes submitted after the fsync
+	 * was issued may have already incremented inflight_issued by the
+	 * time the fsync completes, so reading inflight_issued here would
+	 * produce a threshold that is too high, causing those post-fsync
+	 * writes to appear safe and get verified incorrectly.
+	 *
+	 * Take the max so that out-of-order fsync completions never lower
+	 * the threshold.
+	 */
+	if (io_u->numberio > td->safe_inflight_issued)
+		td->safe_inflight_issued = io_u->numberio;
+
+	new_active = 1 - td->inflight_active_buf;
+
+	/* Clear the new active buffer before switching to it. */
+	for (i = 0; i < td->o.iodepth; i++)
+		td->inflight_numberio[new_active * td->o.iodepth + i] = INVALID_NUMBERIO;
+
+	td->inflight_active_buf = new_active;
+	td->next_inflight_numberio_idx = 0;
+
+	dprint(FD_VERIFY, "on_fsync_completed: safe_issued=%"PRIu64", new_active_buf=%u\n",
+		td->safe_inflight_issued, new_active);
 }
 
 /*
@@ -1372,20 +1427,29 @@ reap:
 
 static int init_inflight_logging(struct thread_data *td)
 {
-	unsigned int i;
+	unsigned int i, alloc_depth;
 
 	if (td->o.verify == VERIFY_NONE || !td->o.verify_state_save)
 		return 0;
 
-	td->inflight_numberio = scalloc(td->o.iodepth, sizeof(uint64_t));
+	/*
+	 * For verify_type=fsync, allocate two buffers: the active one for
+	 * post-fsync writes and the inactive one for pre-fsync writes.
+	 */
+	alloc_depth = (td->o.verify_type == VERIFY_TYPE_FSYNC) ?
+		       2 * td->o.iodepth : td->o.iodepth;
+
+	td->inflight_numberio = scalloc(alloc_depth, sizeof(uint64_t));
 	if (!td->inflight_numberio) {
 		log_err("fio: failed to alloc inflight write data\n");
 		return 1;
 	}
 
-	for (i = 0; i < td->o.iodepth; i++)
+	for (i = 0; i < alloc_depth; i++)
 		td->inflight_numberio[i] = INVALID_NUMBERIO;
 
+	td->inflight_active_buf = 0;
+	td->safe_inflight_issued = 0;
 	return 0;
 }
 

@@ -1057,8 +1057,17 @@ static int fill_io_u(struct thread_data *td, struct io_u *io_u)
 	/*
 	 * fsync() or fdatasync() or trim etc, we are done
 	 */
-	if (!ddir_rw(io_u->ddir))
+	if (!ddir_rw(io_u->ddir)) {
+		/*
+		 * For verify_type=fsync, capture inflight_issued at fsync
+		 * submission time so on_fsync_completed() uses the correct
+		 * threshold (not the potentially higher value at completion
+		 * time, when post-fsync writes may already be in-flight).
+		 */
+		if (ddir_sync(io_u->ddir) && td->o.verify_type == VERIFY_TYPE_FSYNC)
+			io_u->numberio = atomic_load_acquire(&td->inflight_issued);
 		goto out;
+	}
 
 	if (td->o.zone_mode == ZONE_MODE_STRIDED)
 		setup_strided_zone_mode(td, io_u);
@@ -2174,6 +2183,7 @@ static void io_completed(struct thread_data *td, struct io_u **io_u_ptr,
 	if (ddir_sync(ddir)) {
 		if (io_u->error)
 			goto error;
+		on_fsync_completed(td, io_u);
 		if (f) {
 			f->first_write = -1ULL;
 			f->last_write = -1ULL;

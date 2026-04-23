@@ -91,6 +91,7 @@ struct io_u {
 	unsigned int error;
 
 	int inflight_idx;
+	int inflight_buf_idx;	/* which of the two inflight buffers this write is in */
 
 	/*
 	 * io engine private data
