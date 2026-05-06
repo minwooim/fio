@@ -173,6 +173,7 @@ void reset_all_stats(struct thread_data *td)
 	td->last_thinktime = td->epoch;
 
 	lat_target_reset(td);
+	iodepth_range_reset(td);
 	clear_rusage_stat(td);
 	helper_reset();
 }

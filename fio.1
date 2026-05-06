@@ -3174,7 +3174,7 @@ performance. The default is to enable it only if
 Avoid using a separate thread for completion polling.
 .SS "I/O depth"
 .TP
-.BI iodepth \fR=\fPint
+.BI iodepth \fR=\fPint[\fR-\fPint]
 Number of I/O units to keep in flight against the file. Note that
 increasing \fBiodepth\fR beyond 1 will not affect synchronous ioengines (except
 for small degrees when \fBverify_async\fR is in use). Even async
@@ -3183,6 +3183,18 @@ achieved. This may happen on Linux when using libaio and not setting
 `direct=1', since buffered I/O is not async on that OS. Keep an
 eye on the I/O depth distribution in the fio output to verify that the
 achieved depth is as expected. Default: 1.
+.RS
+.P
+A range may also be given (e.g. \fBiodepth=4-32\fR). The effective queue
+depth then steps through a doubling sequence between \fImin\fR and \fImax\fR
+(clamped to \fImax\fR), holding each step for \fBiodepth_period\fR before
+advancing and wrapping back to \fImin\fR. Cannot be combined with
+\fBlatency_target\fR.
+.RE
+.TP
+.BI iodepth_period \fR=\fPtime
+When \fBiodepth\fR is a range, time spent at each step before advancing to
+the next. In seconds unless a unit is given. Default: 5s.
 .TP
 .BI iodepth_batch_submit \fR=\fPint "\fR,\fP iodepth_batch" \fR=\fPint
 This defines how many pieces of I/O to submit at once. It defaults to 1

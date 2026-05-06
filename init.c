@@ -797,6 +797,20 @@ static int fixup_options(struct thread_data *td)
 		o->thinktime_spin = o->thinktime;
 
 	/*
+	 * iodepth as a range needs both bounds set; reject conflicts with
+	 * latency_target (which already drives a dynamic queue depth).
+	 */
+	if (!o->iodepth_min)
+		o->iodepth_min = o->iodepth;
+	if (o->iodepth_min > o->iodepth)
+		o->iodepth_min = o->iodepth;
+	if (o->iodepth_min < o->iodepth && o->latency_target) {
+		log_err("fio: iodepth range cannot be combined with "
+			"latency_target\n");
+		ret |= 1;
+	}
+
+	/*
 	 * The low water mark cannot be bigger than the iodepth
 	 */
 	if (o->iodepth_low > o->iodepth || !o->iodepth_low)

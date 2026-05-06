@@ -433,6 +433,17 @@ struct thread_data {
 	int latency_end_run;
 
 	/*
+	 * iodepth range (--iodepth=min-max) state. effective_iodepth is the
+	 * current cap; it advances through iodepth_steps[] every iodepth_period
+	 * elapsed since iodepth_step_ts.
+	 */
+	unsigned int effective_iodepth;
+	unsigned int iodepth_steps[16];
+	unsigned int iodepth_steps_nr;
+	unsigned int iodepth_step_idx;
+	struct timespec iodepth_step_ts;
+
+	/*
 	 * read/write mixed workload state
 	 */
 	struct frand_state rwmix_state;
@@ -790,6 +801,11 @@ extern int io_queue_event(struct thread_data *td, struct io_u *io_u, int *ret,
 extern void lat_target_check(struct thread_data *);
 extern void lat_target_init(struct thread_data *);
 extern void lat_target_reset(struct thread_data *);
+
+extern bool iodepth_range_active(const struct thread_data *);
+extern void iodepth_range_init(struct thread_data *);
+extern void iodepth_range_reset(struct thread_data *);
+extern void iodepth_range_step(struct thread_data *);
 
 /*
  * Inflight log

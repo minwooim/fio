@@ -3427,7 +3427,7 @@ with the caveat that when used on the command line, they must come after the
 I/O depth
 ~~~~~~~~~
 
-.. option:: iodepth=int
+.. option:: iodepth=int[-int]
 
 	Number of I/O units to keep in flight against the file.  Note that
 	increasing *iodepth* beyond 1 will not affect synchronous ioengines (except
@@ -3437,6 +3437,19 @@ I/O depth
 	:option:`direct`\=1, since buffered I/O is not async on that OS.  Keep an
 	eye on the I/O depth distribution in the fio output to verify that the
 	achieved depth is as expected. Default: 1.
+
+	A range may also be given (e.g. ``iodepth=4-32``). When a range is set,
+	the effective queue depth steps through a doubling sequence between *min*
+	and *max* (clamped to *max*) and wraps when it reaches the top, holding
+	each step for :option:`iodepth_period`. This lets a single job exercise
+	multiple queue depths over time. Cannot be combined with
+	:option:`latency_target`.
+
+.. option:: iodepth_period=time
+
+	When :option:`iodepth` is given as a range, this controls how long each
+	step in the iodepth cycle lasts before advancing to the next step. The
+	value is in seconds unless a unit is given. Default: 5s.
 
 .. option:: iodepth_batch_submit=int, iodepth_batch=int
 

@@ -1095,6 +1095,7 @@ static void do_io(struct thread_data *td, uint64_t *bytes_done)
 		td_set_runstate(td, TD_RUNNING);
 
 	lat_target_init(td);
+	iodepth_range_init(td);
 
 	total_bytes = td->o.size;
 	/*
@@ -1149,6 +1150,8 @@ static void do_io(struct thread_data *td, uint64_t *bytes_done)
 
 		if (flow_threshold_exceeded(td))
 			continue;
+
+		iodepth_range_step(td);
 
 		/*
 		 * Break if we exceeded the bytes. The exception is time

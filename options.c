@@ -360,6 +360,77 @@ out:
 	return ret;
 }
 
+static int str_iodepth_cb(void *data, const char *input)
+{
+	struct thread_data *td = cb_data_to_td(data);
+	struct thread_options *o = &td->o;
+	char *str, *p, *dash;
+	long long lo, hi;
+	int ret = 0;
+
+	if (!input || !*input) {
+		log_err("fio: iodepth requires a value\n");
+		return 1;
+	}
+
+	p = str = strdup(input);
+	strip_blank_front(&str);
+	strip_blank_end(str);
+
+	dash = strchr(str, '-');
+	if (!dash)
+		dash = strchr(str, ':');
+
+	if (dash) {
+		*dash = '\0';
+		if (check_str_bytes(str, &lo, NULL) ||
+		    check_str_bytes(dash + 1, &hi, NULL)) {
+			log_err("fio: failed to parse iodepth range '%s'\n", input);
+			ret = 1;
+			goto out;
+		}
+		if (lo <= 0 || hi <= 0) {
+			log_err("fio: iodepth values must be >= 1\n");
+			ret = 1;
+			goto out;
+		}
+		if (lo > hi) {
+			long long tmp = lo;
+			lo = hi;
+			hi = tmp;
+		}
+		if (hi > UINT_MAX) {
+			log_err("fio: iodepth value out of range\n");
+			ret = 1;
+			goto out;
+		}
+		o->iodepth_min = (unsigned int) lo;
+		o->iodepth = (unsigned int) hi;
+	} else {
+		if (check_str_bytes(str, &lo, NULL)) {
+			log_err("fio: failed to parse iodepth '%s'\n", input);
+			ret = 1;
+			goto out;
+		}
+		if (lo <= 0) {
+			log_err("fio: iodepth must be >= 1\n");
+			ret = 1;
+			goto out;
+		}
+		if (lo > UINT_MAX) {
+			log_err("fio: iodepth value out of range\n");
+			ret = 1;
+			goto out;
+		}
+		o->iodepth = (unsigned int) lo;
+		o->iodepth_min = (unsigned int) lo;
+	}
+
+out:
+	free(p);
+	return ret;
+}
+
 static int str_bssplit_cb(void *data, const char *input)
 {
 	struct thread_data *td = cb_data_to_td(data);
@@ -2363,12 +2434,25 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 	{
 		.name	= "iodepth",
 		.lname	= "IO Depth",
-		.type	= FIO_OPT_INT,
+		.type	= FIO_OPT_STR,
+		.cb	= str_iodepth_cb,
 		.off1	= offsetof(struct thread_options, iodepth),
-		.help	= "Number of IO buffers to keep in flight",
-		.minval = 1,
-		.interval = 1,
+		.help	= "Number of IO buffers to keep in flight, or a range (min-max)",
 		.def	= "1",
+		.category = FIO_OPT_C_IO,
+		.group	= FIO_OPT_G_IO_BASIC,
+	},
+	{
+		.name	= "iodepth_period",
+		.lname	= "IO Depth Step Period",
+		.type	= FIO_OPT_INT,
+		.off1	= offsetof(struct thread_options, iodepth_period),
+		.help	= "Time between iodepth steps when iodepth is a range",
+		.parent	= "iodepth",
+		.hide	= 1,
+		.def	= "5s",
+		.is_seconds = 1,
+		.is_time = 1,
 		.category = FIO_OPT_C_IO,
 		.group	= FIO_OPT_G_IO_BASIC,
 	},

@@ -92,6 +92,8 @@ struct thread_options {
 	unsigned int ddir_seq_nr;
 	long long ddir_seq_add;
 	unsigned int iodepth;
+	unsigned int iodepth_min;
+	unsigned int iodepth_period;
 	unsigned int iodepth_low;
 	unsigned int iodepth_batch;
 	unsigned int iodepth_batch_complete_min;
@@ -436,6 +438,8 @@ struct thread_options_pack {
 	uint32_t ddir_seq_nr;
 	uint64_t ddir_seq_add;
 	uint32_t iodepth;
+	uint32_t iodepth_min;
+	uint32_t iodepth_period;
 	uint32_t iodepth_low;
 	uint32_t iodepth_batch;
 	uint32_t iodepth_batch_complete_min;

@@ -1702,9 +1702,78 @@ void lat_target_check(struct thread_data *td)
 		__lat_target_failed(td);
 }
 
+bool iodepth_range_active(const struct thread_data *td)
+{
+	return td->o.iodepth_min && td->o.iodepth_min < td->o.iodepth;
+}
+
+/*
+ * Build a geometric (doubling) step sequence between min and max, with the
+ * last entry clamped to max. Up to FIO_ARRAY_SIZE(iodepth_steps) entries.
+ */
+void iodepth_range_init(struct thread_data *td)
+{
+	unsigned int min = td->o.iodepth_min;
+	unsigned int max = td->o.iodepth;
+	unsigned int v, n = 0;
+
+	td->iodepth_steps_nr = 0;
+	td->iodepth_step_idx = 0;
+	td->effective_iodepth = max;
+
+	if (!iodepth_range_active(td))
+		return;
+
+	v = min;
+	while (n < FIO_ARRAY_SIZE(td->iodepth_steps) && v < max) {
+		td->iodepth_steps[n++] = v;
+		if (v > max / 2)
+			break;
+		v *= 2;
+	}
+	if (n < FIO_ARRAY_SIZE(td->iodepth_steps))
+		td->iodepth_steps[n++] = max;
+
+	td->iodepth_steps_nr = n;
+	td->effective_iodepth = td->iodepth_steps[0];
+	fio_gettime(&td->iodepth_step_ts, NULL);
+}
+
+void iodepth_range_reset(struct thread_data *td)
+{
+	if (!iodepth_range_active(td))
+		return;
+	td->iodepth_step_idx = 0;
+	td->effective_iodepth = td->iodepth_steps[0];
+	fio_gettime(&td->iodepth_step_ts, NULL);
+}
+
+/*
+ * Advance the effective iodepth to the next step if iodepth_period has
+ * elapsed. Wraps from the last step back to the first. Called from the IO
+ * submission hot path; cheap when range mode is inactive.
+ */
+void iodepth_range_step(struct thread_data *td)
+{
+	uint64_t elapsed_us;
+
+	if (!iodepth_range_active(td) || !td->o.iodepth_period)
+		return;
+
+	elapsed_us = utime_since_now(&td->iodepth_step_ts);
+	if (elapsed_us < td->o.iodepth_period)
+		return;
+
+	td->iodepth_step_idx = (td->iodepth_step_idx + 1) % td->iodepth_steps_nr;
+	td->effective_iodepth = td->iodepth_steps[td->iodepth_step_idx];
+	fio_gettime(&td->iodepth_step_ts, NULL);
+	dprint(FD_RATE, "iodepth step -> %u\n", td->effective_iodepth);
+}
+
 /*
  * If latency target is enabled, we might be ramping up or down and not
- * using the full queue depth available.
+ * using the full queue depth available. If iodepth is a range, the cap
+ * cycles between min and max over time.
  */
 bool queue_full(const struct thread_data *td)
 {
@@ -1712,10 +1781,11 @@ bool queue_full(const struct thread_data *td)
 
 	if (qempty)
 		return true;
-	if (!td->o.latency_target)
-		return false;
-
-	return td->cur_depth >= td->latency_qd;
+	if (td->o.latency_target)
+		return td->cur_depth >= td->latency_qd;
+	if (iodepth_range_active(td))
+		return td->cur_depth >= td->effective_iodepth;
+	return false;
 }
 
 struct io_u *__get_io_u(struct thread_data *td)
