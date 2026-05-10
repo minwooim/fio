@@ -41,7 +41,27 @@ struct all_io_list {
 	struct thread_io_list state[0];
 };
 
-#define VSTATE_HDR_VERSION	0x05
+#define VSTATE_HDR_VERSION		0x07
+
+/* Number of I/O directions saved in vstate_workload (read/write/trim) */
+#define VSTATE_WL_DDIR_CNT		3
+
+/*
+ * Workload parameters saved in v6 state files so that verify_multiple_jobs
+ * can replay each prior run as a dry-run without the user re-specifying them.
+ */
+struct vstate_workload {
+	uint64_t td_ddir;		/* enum td_ddir cast to u64 */
+	uint64_t bs[VSTATE_WL_DDIR_CNT]; /* block size per direction */
+	uint64_t size;
+	uint64_t io_size;
+	uint64_t start_offset;
+	uint64_t offset_increment;	/* td->o.offset_increment */
+	uint64_t random_distribution;	/* enum FIO_RAND_DIST_* cast to u64 */
+	uint64_t zipf_theta;		/* fio_fp64_t.u.i bits (zipf only) */
+	uint64_t pareto_h;		/* fio_fp64_t.u.i bits (pareto only) */
+	uint64_t random_center;		/* fio_fp64_t.u.i bits (-1.0 = random) */
+};
 
 struct verify_state_hdr {
 	uint64_t version;
@@ -56,6 +76,9 @@ extern struct all_io_list *get_all_io_list(int, size_t *);
 extern void __verify_save_state(struct all_io_list *, const char *);
 extern void verify_save_state(int mask);
 extern int verify_load_state(struct thread_data *, const char *);
+extern int verify_load_state_and_workload(const char *prefix, const char *name,
+					  int num, struct vstate_workload *wl,
+					  struct thread_io_list **til_out);
 extern void verify_free_state(struct thread_data *);
 extern int verify_state_should_stop(struct thread_data *, uint64_t);
 extern void verify_assign_state(struct thread_data *, void *);

@@ -62,6 +62,49 @@ static void show(struct thread_io_list *s, size_t size)
 	} while (size != 0);
 }
 
+static const char *rand_dist_name(uint64_t d)
+{
+	switch (d) {
+	case 0: return "random";
+	case 1: return "zipf";
+	case 2: return "pareto";
+	case 3: return "gauss";
+	case 4: return "zoned";
+	case 5: return "zoned_abs";
+	default: return "unknown";
+	}
+}
+
+static double u64_bits_to_double(uint64_t v)
+{
+	double d;
+	memcpy(&d, &v, sizeof(d));
+	return d;
+}
+
+static void show_workload(struct vstate_workload *wl)
+{
+	uint64_t dist = le64_to_cpu(wl->random_distribution);
+
+	printf("Workload:\n");
+	printf("  td_ddir:\t\t%llu\n", (unsigned long long) le64_to_cpu(wl->td_ddir));
+	printf("  bs[read]:\t\t%llu\n", (unsigned long long) le64_to_cpu(wl->bs[0]));
+	printf("  bs[write]:\t\t%llu\n", (unsigned long long) le64_to_cpu(wl->bs[1]));
+	printf("  bs[trim]:\t\t%llu\n", (unsigned long long) le64_to_cpu(wl->bs[2]));
+	printf("  size:\t\t\t%llu\n", (unsigned long long) le64_to_cpu(wl->size));
+	printf("  io_size:\t\t%llu\n", (unsigned long long) le64_to_cpu(wl->io_size));
+	printf("  start_offset:\t\t%llu\n", (unsigned long long) le64_to_cpu(wl->start_offset));
+	printf("  offset_increment:\t%llu\n", (unsigned long long) le64_to_cpu(wl->offset_increment));
+	printf("  random_distribution:\t%llu (%s)\n", (unsigned long long) dist,
+	       rand_dist_name(dist));
+	printf("  zipf_theta:\t\t%.6f\n",
+	       u64_bits_to_double(le64_to_cpu(wl->zipf_theta)));
+	printf("  pareto_h:\t\t%.6f\n",
+	       u64_bits_to_double(le64_to_cpu(wl->pareto_h)));
+	printf("  random_center:\t%.6f\n",
+	       u64_bits_to_double(le64_to_cpu(wl->random_center)));
+}
+
 static void show_verify_state(void *buf, size_t size)
 {
 	struct verify_state_hdr *hdr = buf;
@@ -89,10 +132,14 @@ static void show_verify_state(void *buf, size_t size)
 		return;
 	}
 
-	if (hdr->version == VSTATE_HDR_VERSION)
+	if (hdr->version == VSTATE_HDR_VERSION) {
+		show_workload((struct vstate_workload *) s);
+		s = (struct thread_io_list *)((char *)s + sizeof(struct vstate_workload));
+		size -= sizeof(struct vstate_workload);
 		show(s, size);
-	else
+	} else {
 		log_err("Unsupported version %d\n", (int) hdr->version);
+	}
 }
 
 static int show_file(const char *file)

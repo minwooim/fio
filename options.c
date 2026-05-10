@@ -3563,6 +3563,16 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 		.group	= FIO_OPT_G_VERIFY,
 	},
 	{
+		.name	= "verify_multiple_jobs",
+		.lname	= "Verify multiple jobs",
+		.type	= FIO_OPT_STR_STORE,
+		.off1	= offsetof(struct thread_options, verify_multiple_jobs),
+		.help	= "Comma-separated list of prior job names to dry-run before verify",
+		.parent	= "verify",
+		.category = FIO_OPT_C_IO,
+		.group	= FIO_OPT_G_VERIFY,
+	},
+	{
 		.name	= "verify_write_sequence",
 		.lname	= "Verify write sequence number",
 		.off1	= offsetof(struct thread_options, verify_write_sequence),

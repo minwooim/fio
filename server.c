@@ -2416,8 +2416,8 @@ fail:
 	}
 
 	/*
-	 * The format is verify_state_hdr, then thread_io_list. Verify
-	 * the header, and the thread_io_list checksum
+	 * Format is [verify_state_hdr][vstate_workload][thread_io_list].
+	 * Verify the header CRC, then hand the caller just the thread_io_list.
 	 */
 	s = rep->data + sizeof(struct verify_state_hdr);
 	if (verify_state_hdr(rep->data, s)) {
@@ -2425,13 +2425,10 @@ fail:
 		goto fail;
 	}
 
-	/*
-	 * Don't need the header from now, copy just the thread_io_list
-	 */
 	ret = 0;
-	rep->size -= sizeof(struct verify_state_hdr);
+	rep->size -= sizeof(struct verify_state_hdr) + sizeof(struct vstate_workload);
 	data = malloc(rep->size);
-	memcpy(data, s, rep->size);
+	memcpy(data, (char *)s + sizeof(struct vstate_workload), rep->size);
 	*datap = data;
 
 	sfree(rep->data);

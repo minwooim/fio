@@ -55,6 +55,7 @@
 #include "pshared.h"
 #include "zone-dist.h"
 #include "fio_time.h"
+#include "trim.h"
 
 static struct fio_sem *startup_sem;
 static struct flist_head *cgroup_list;
@@ -1790,6 +1791,156 @@ static uint64_t do_dry_run(struct thread_data *td)
 	return td->bytes_done[DDIR_WRITE] + td->bytes_done[DDIR_TRIM];
 }
 
+/*
+ * Move all io_hist_list entries into io_hist_tree, erasing any existing tree
+ * entries that overlap with an incoming piece (later writes win).  Used
+ * between per-job dry-runs so that a later job's pieces correctly supersede
+ * the earlier job's pieces at overlapping offsets.
+ */
+static void migrate_hist_list_to_tree(struct thread_data *td)
+{
+	while (!flist_empty(&td->io_hist_list)) {
+		struct io_piece *ipo, *__ipo;
+		struct fio_rb_node **p, *parent;
+
+		ipo = flist_first_entry(&td->io_hist_list, struct io_piece, list);
+		flist_del(&ipo->list);
+		ipo->flags &= ~IP_F_ONLIST;
+
+		RB_CLEAR_NODE(&ipo->rb_node);
+restart:
+		p = &td->io_hist_tree.rb_node;
+		parent = NULL;
+		while (*p) {
+			int overlap = 0;
+
+			parent = *p;
+			__ipo = rb_entry(parent, struct io_piece, rb_node);
+
+			if (ipo->file < __ipo->file)
+				p = &(*p)->rb_left;
+			else if (ipo->file > __ipo->file)
+				p = &(*p)->rb_right;
+			else if (ipo->offset < __ipo->offset) {
+				p = &(*p)->rb_left;
+				overlap = ipo->offset + ipo->len > __ipo->offset;
+			} else if (ipo->offset > __ipo->offset) {
+				p = &(*p)->rb_right;
+				overlap = __ipo->offset + __ipo->len > ipo->offset;
+			} else
+				overlap = 1;
+
+			if (overlap) {
+				td->io_hist_len--;
+				rb_erase(parent, &td->io_hist_tree);
+				remove_trim_entry(td, __ipo);
+				if (!(__ipo->flags & IP_F_IN_FLIGHT))
+					free(__ipo);
+				goto restart;
+			}
+		}
+
+		rb_link_node(&ipo->rb_node, parent, p);
+		rb_insert_color(&ipo->rb_node, &td->io_hist_tree);
+		ipo->flags |= IP_F_ONRB;
+		/* io_hist_len unchanged: just moved from list to tree */
+	}
+}
+
+/*
+ * Replay each job listed in verify_multiple_jobs as a dry-run so that all
+ * their written offsets are populated into io_hist_tree before the single
+ * verify pass.  Returns total bytes dry-run across all listed jobs.
+ */
+static uint64_t run_prior_jobs_dryrun(struct thread_data *td)
+{
+	char prefix[PATH_MAX];
+	struct thread_options saved_o;
+	char *jobs_copy, *token;
+	uint64_t total_bytes = 0;
+	int d;
+
+	if (!td->o.verify_multiple_jobs)
+		return 0;
+
+	if (aux_path)
+		sprintf(prefix, "%s%clocal", aux_path, FIO_OS_PATH_SEPARATOR);
+	else
+		strcpy(prefix, "local");
+
+	jobs_copy = strdup(td->o.verify_multiple_jobs);
+	memcpy(&saved_o, &td->o, sizeof(saved_o));
+
+	token = strtok(jobs_copy, ",");
+	while (token) {
+		struct vstate_workload wl;
+		struct thread_io_list *til;
+
+		if (verify_load_state_and_workload(prefix, token,
+					td->thread_number - 1, &wl, &til)) {
+			td->error = EINVAL;
+			log_err("fio: verify_multiple_jobs: failed to load state for '%s'\n",
+				token);
+			break;
+		}
+
+		/* Apply prior job's workload params */
+		td->o.td_ddir = (enum td_ddir) wl.td_ddir;
+		for (d = 0; d < DDIR_RWDIR_CNT; d++) {
+			td->o.bs[d] = wl.bs[d];
+			td->o.min_bs[d] = wl.bs[d];
+			td->o.max_bs[d] = wl.bs[d];
+		}
+		td->o.rw_min_bs = wl.bs[DDIR_WRITE] ?
+				  wl.bs[DDIR_WRITE] : wl.bs[DDIR_READ];
+		td->o.size = wl.size;
+		td->o.io_size = wl.io_size;
+		td->o.start_offset = wl.start_offset;
+		td->o.offset_increment = wl.offset_increment;
+		td->o.random_distribution = (unsigned int) wl.random_distribution;
+		td->o.zipf_theta.u.i = wl.zipf_theta;
+		td->o.pareto_h.u.i = wl.pareto_h;
+		td->o.random_center.u.i = wl.random_center;
+		td->o.loops = 1;
+
+		/* Reset file positions, byte counters, and RNG for this prior run */
+		clear_io_state(td, 1);
+
+		/*
+		 * For non-uniform distributions (zipf/pareto/gauss), reinitialize
+		 * per-file state (e.g. f->zipf) since clear_io_state does not do
+		 * so.  Uniform random and sequential jobs need no special init here.
+		 */
+		if (td->o.random_distribution == FIO_RAND_DIST_ZIPF ||
+		    td->o.random_distribution == FIO_RAND_DIST_PARETO ||
+		    td->o.random_distribution == FIO_RAND_DIST_GAUSS) {
+			init_random_map(td);
+			/*
+			 * Non-uniform distributions don't use axmap (duplicates
+			 * are expected); skip mark_random_map to avoid assertion.
+			 */
+			td->o.norandommap = 1;
+		}
+
+		total_bytes += do_dry_run(td);
+		migrate_hist_list_to_tree(td);
+
+		free(til);
+
+		/* Restore for next iteration */
+		memcpy(&td->o, &saved_o, sizeof(saved_o));
+
+		token = strtok(NULL, ",");
+	}
+
+	free(jobs_copy);
+
+	/* Final reset so the verify pass starts from a clean state */
+	clear_io_state(td, 1);
+
+	return total_bytes;
+}
+
 struct fork_data {
 	struct thread_data *td;
 	struct sk_out *sk_out;
@@ -2066,8 +2217,12 @@ static void *thread_main(void *data)
 
 		prune_io_piece_log(td);
 
-		if (td->o.verify_only && td_write(td))
-			verify_bytes = do_dry_run(td);
+		if (td->o.verify_only && td_write(td)) {
+			if (td->o.verify_multiple_jobs)
+				verify_bytes = run_prior_jobs_dryrun(td);
+			else
+				verify_bytes = do_dry_run(td);
+		}
 		else {
 			if (!td->o.rand_repeatable)
 				/* save verify rand state to replay hdr seeds later at verify */

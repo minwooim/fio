@@ -159,6 +159,7 @@ struct thread_options {
 	unsigned int experimental_verify;
 	unsigned int verify_state;
 	unsigned int verify_state_save;
+	char *verify_multiple_jobs;
 	unsigned int verify_write_sequence;
 	unsigned int verify_header_seed;
 	unsigned int use_thread;

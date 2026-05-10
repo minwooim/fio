@@ -1738,69 +1738,136 @@ static int open_state_file(const char *name, const char *prefix, int num,
 	return fd;
 }
 
+/* Write a thread_io_list state to disk: [hdr][vstate_workload][thread_io_list]. */
 static int write_thread_list_state(struct thread_io_list *s,
-				   const char *prefix)
+				   const char *prefix,
+				   const struct vstate_workload *wl)
 {
 	struct verify_state_hdr hdr;
+	size_t til_sz = thread_io_list_sz(s);
+	size_t payload_sz = sizeof(*wl) + til_sz;
+	void *payload = malloc(payload_sz);
 	uint64_t crc;
 	ssize_t ret;
 	int fd;
 
 	fd = open_state_file((const char *) s->name, prefix, s->index, 1);
-	if (fd == -1)
+	if (fd == -1) {
+		free(payload);
 		return 1;
+	}
 
-	crc = fio_crc32c((void *)s, thread_io_list_sz(s));
-
+	memcpy(payload, wl, sizeof(*wl));
+	memcpy((char *)payload + sizeof(*wl), s, til_sz);
+	crc = fio_crc32c(payload, payload_sz);
 	hdr.version = cpu_to_le64((uint64_t) VSTATE_HDR_VERSION);
-	hdr.size = cpu_to_le64((uint64_t) thread_io_list_sz(s));
+	hdr.size = cpu_to_le64((uint64_t) payload_sz);
 	hdr.crc = cpu_to_le64(crc);
 	ret = write(fd, &hdr, sizeof(hdr));
-	if (ret != sizeof(hdr))
-		goto write_fail;
-
-	ret = write(fd, s, thread_io_list_sz(s));
-	if (ret != thread_io_list_sz(s)) {
-write_fail:
+	if (ret == sizeof(hdr))
+		ret = write(fd, payload, payload_sz);
+	free(payload);
+	if (ret != (ssize_t) payload_sz) {
 		if (ret < 0)
 			perror("fio: write state file");
 		log_err("fio: failed to write state file\n");
-		ret = 1;
-	} else
-		ret = 0;
+		close(fd);
+		return 1;
+	}
 
 	close(fd);
-	return ret;
+	return 0;
 }
 
 void __verify_save_state(struct all_io_list *state, const char *prefix)
 {
 	struct thread_io_list *s = &state->state[0];
+	struct vstate_workload wl;
 	unsigned int i;
 
+	memset(&wl, 0, sizeof(wl));
 	for (i = 0; i < le64_to_cpu(state->threads); i++) {
-		write_thread_list_state(s,  prefix);
+		write_thread_list_state(s, prefix, &wl);
 		s = io_list_next(s);
 	}
 }
 
+static void fill_til_from_td(struct thread_io_list *s, struct thread_data *td,
+			     int td_index)
+{
+	int i;
+
+	for (i = 0; td->inflight_numberio && i < td->o.iodepth; i++)
+		s->inflight[i].numberio =
+			cpu_to_le64(atomic_load_acquire(&td->inflight_numberio[i]));
+
+	s->depth = cpu_to_le32((uint32_t) td->o.iodepth);
+	s->numberio = cpu_to_le64((uint64_t) atomic_load_acquire(&td->inflight_issued));
+	s->index = cpu_to_le64((uint64_t) td_index);
+
+	if (td->offset_state.use64) {
+		s->rand.state64.s[0] = cpu_to_le64(td->offset_state.state64.s1);
+		s->rand.state64.s[1] = cpu_to_le64(td->offset_state.state64.s2);
+		s->rand.state64.s[2] = cpu_to_le64(td->offset_state.state64.s3);
+		s->rand.state64.s[3] = cpu_to_le64(td->offset_state.state64.s4);
+		s->rand.state64.s[4] = cpu_to_le64(td->offset_state.state64.s5);
+		s->rand.state64.s[5] = 0;
+		s->rand.use64 = cpu_to_le64((uint64_t)1);
+	} else {
+		s->rand.state32.s[0] = cpu_to_le32(td->offset_state.state32.s1);
+		s->rand.state32.s[1] = cpu_to_le32(td->offset_state.state32.s2);
+		s->rand.state32.s[2] = cpu_to_le32(td->offset_state.state32.s3);
+		s->rand.state32.s[3] = 0;
+		s->rand.use64 = 0;
+	}
+	snprintf((char *) s->name, sizeof(s->name), "%s", td->o.name);
+}
+
+/*
+ * Local save: write v6 format with workload parameters embedded so that
+ * verify_multiple_jobs can later replay each run as a dry-run.
+ */
 void verify_save_state(int mask)
 {
-	struct all_io_list *state;
-	size_t sz;
+	char prefix[PATH_MAX];
 
-	state = get_all_io_list(mask, &sz);
-	if (state) {
-		char prefix[PATH_MAX];
+	if (aux_path)
+		sprintf(prefix, "%s%clocal", aux_path, FIO_OS_PATH_SEPARATOR);
+	else
+		strcpy(prefix, "local");
 
-		if (aux_path)
-			sprintf(prefix, "%s%clocal", aux_path, FIO_OS_PATH_SEPARATOR);
-		else
-			strcpy(prefix, "local");
+	for_each_td(td) {
+		struct thread_io_list *s;
+		struct vstate_workload wl;
+		size_t til_sz;
+		int d;
 
-		__verify_save_state(state, prefix);
-		free(state);
-	}
+		if (mask != IO_LIST_ALL && (__td_index + 1) != mask)
+			continue;
+
+		td->stop_io = 1;
+		td->flags |= TD_F_VSTATE_SAVED;
+
+		til_sz = __thread_io_list_sz(td->o.iodepth);
+		s = calloc(1, til_sz);
+
+		fill_til_from_td(s, td, __td_index);
+
+		wl.td_ddir = cpu_to_le64((uint64_t) td->o.td_ddir);
+		for (d = 0; d < VSTATE_WL_DDIR_CNT; d++)
+			wl.bs[d] = cpu_to_le64(td->o.bs[d]);
+		wl.size = cpu_to_le64(td->o.size);
+		wl.io_size = cpu_to_le64(td->o.io_size);
+		wl.start_offset = cpu_to_le64(td->o.start_offset);
+		wl.offset_increment = cpu_to_le64((uint64_t) td->o.offset_increment);
+		wl.random_distribution = cpu_to_le64((uint64_t) td->o.random_distribution);
+		wl.zipf_theta = cpu_to_le64(td->o.zipf_theta.u.i);
+		wl.pareto_h = cpu_to_le64(td->o.pareto_h.u.i);
+		wl.random_center = cpu_to_le64(td->o.random_center.u.i);
+
+		write_thread_list_state(s, prefix, &wl);
+		free(s);
+	} end_for_each();
 }
 
 void verify_free_state(struct thread_data *td)
@@ -1855,7 +1922,8 @@ int verify_state_hdr(struct verify_state_hdr *hdr, struct thread_io_list *s)
 int verify_load_state(struct thread_data *td, const char *prefix)
 {
 	struct verify_state_hdr hdr;
-	void *s = NULL;
+	void *payload = NULL;
+	struct thread_io_list *s;
 	uint64_t crc;
 	ssize_t ret;
 	int fd;
@@ -1885,16 +1953,16 @@ int verify_load_state(struct thread_data *td, const char *prefix)
 		goto err;
 	}
 
-	s = malloc(hdr.size);
-	ret = read(fd, s, hdr.size);
-	if (ret != hdr.size) {
+	payload = malloc(hdr.size);
+	ret = read(fd, payload, hdr.size);
+	if (ret != (ssize_t) hdr.size) {
 		if (ret < 0)
 			td_verror(td, errno, "read verify state");
-		log_err("fio: failed reading verity state\n");
+		log_err("fio: failed reading verify state\n");
 		goto err;
 	}
 
-	crc = fio_crc32c(s, hdr.size);
+	crc = fio_crc32c(payload, hdr.size);
 	if (crc != hdr.crc) {
 		log_err("fio: verify state is corrupt\n");
 		goto err;
@@ -1902,12 +1970,102 @@ int verify_load_state(struct thread_data *td, const char *prefix)
 
 	close(fd);
 
+	{
+		size_t til_sz = hdr.size - sizeof(struct vstate_workload);
+		s = malloc(til_sz);
+		memcpy(s, (char *)payload + sizeof(struct vstate_workload), til_sz);
+		free(payload);
+	}
+
 	verify_assign_state(td, s);
 	return 0;
 err:
-	if (s)
-		free(s);
+	free(payload);
 	close(fd);
+	return 1;
+}
+
+/*
+ * Load a v6 state file for a named job and return the workload parameters and
+ * the thread_io_list.  Used by verify_multiple_jobs dry-run replay.
+ * Caller must free *til_out.
+ */
+int verify_load_state_and_workload(const char *prefix, const char *name,
+				   int num, struct vstate_workload *wl,
+				   struct thread_io_list **til_out)
+{
+	struct verify_state_hdr hdr;
+	void *payload = NULL;
+	uint64_t crc;
+	ssize_t ret;
+	size_t til_sz;
+	int fd, d;
+
+	fd = open_state_file(name, prefix, num, 0);
+	if (fd == -1)
+		return 1;
+
+	ret = read(fd, &hdr, sizeof(hdr));
+	if (ret != sizeof(hdr)) {
+		log_err("fio: failed reading verify state header for '%s'\n", name);
+		goto err;
+	}
+
+	hdr.version = le64_to_cpu(hdr.version);
+	hdr.size = le64_to_cpu(hdr.size);
+	hdr.crc = le64_to_cpu(hdr.crc);
+
+	if (hdr.version != VSTATE_HDR_VERSION) {
+		log_err("fio: '%s': state file version %"PRIu64" not supported "
+			"for verify_multiple_jobs (need v%d)\n",
+			name, hdr.version, VSTATE_HDR_VERSION);
+		goto err;
+	}
+
+	if (hdr.size <= sizeof(struct vstate_workload)) {
+		log_err("fio: '%s': state file too small\n", name);
+		goto err;
+	}
+
+	payload = malloc(hdr.size);
+	ret = read(fd, payload, hdr.size);
+	close(fd);
+	fd = -1;
+
+	if (ret != (ssize_t) hdr.size) {
+		log_err("fio: failed reading verify state for '%s'\n", name);
+		goto err;
+	}
+
+	crc = fio_crc32c(payload, hdr.size);
+	if (crc != hdr.crc) {
+		log_err("fio: verify state for '%s' is corrupt\n", name);
+		goto err;
+	}
+
+	/* Decode workload (LE → host) */
+	memcpy(wl, payload, sizeof(*wl));
+	wl->td_ddir = le64_to_cpu(wl->td_ddir);
+	for (d = 0; d < VSTATE_WL_DDIR_CNT; d++)
+		wl->bs[d] = le64_to_cpu(wl->bs[d]);
+	wl->size = le64_to_cpu(wl->size);
+	wl->io_size = le64_to_cpu(wl->io_size);
+	wl->start_offset = le64_to_cpu(wl->start_offset);
+	wl->offset_increment = le64_to_cpu(wl->offset_increment);
+	wl->random_distribution = le64_to_cpu(wl->random_distribution);
+	wl->zipf_theta = le64_to_cpu(wl->zipf_theta);
+	wl->pareto_h = le64_to_cpu(wl->pareto_h);
+	wl->random_center = le64_to_cpu(wl->random_center);
+
+	til_sz = hdr.size - sizeof(struct vstate_workload);
+	*til_out = malloc(til_sz);
+	memcpy(*til_out, (char *)payload + sizeof(struct vstate_workload), til_sz);
+	free(payload);
+	return 0;
+err:
+	free(payload);
+	if (fd != -1)
+		close(fd);
 	return 1;
 }
 

@@ -856,7 +856,7 @@ static int fixup_options(struct thread_data *td)
 		o->size = -1ULL;
 
 	if (o->verify != VERIFY_NONE) {
-		if (td_write(td) && o->do_verify && o->numjobs > 1 &&
+		if (td_write(td) && o->do_verify && !o->verify_only && o->numjobs > 1 &&
 		    (o->filename ||
 		     !(o->unique_filename &&
 		       strstr(o->filename_format, "$jobname") &&

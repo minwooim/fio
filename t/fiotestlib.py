@@ -90,6 +90,7 @@ class FioExeTest(FioTest):
                 # fio will be stopped with SIGKILL. This does not give fio a
                 # chance to clean up and means that child processes may continue
                 # running and submitting IO.
+                print(" ".join(command))
                 proc = subprocess.Popen(command,
                                         stdout=stdout_file,
                                         stderr=stderr_file,
