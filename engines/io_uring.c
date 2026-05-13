@@ -824,6 +824,13 @@ static int fio_ioring_getevents(struct thread_data *td, unsigned int min,
 
 			if (actual_min != 0)
 				actual_min -= r;
+		} else if (!min) {
+			/*
+			 * !min means it's called as non-blocking meaning that
+			 * if there's no cqe reaped, it should return zero.
+			 * Otherwise, it goes infinite loop.
+			 */
+			return events;
 		}
 
 		if (!o->sqpoll_thread) {
