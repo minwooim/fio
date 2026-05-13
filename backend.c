@@ -646,6 +646,15 @@ static void do_verify(struct thread_data *td, uint64_t verify_bytes)
 	if (td->error)
 		return;
 
+	/*
+	 * read_iolog_get() sets td->done=1 when the iolog is exhausted,
+	 * as a signal to exit do_dry_run().  td_io_getevents() returns 0
+	 * immediately when td->done is set, which would prevent reaping
+	 * completions here.
+	 */
+	if (td->o.read_iolog_file)
+		td->done = 0;
+
 	td_set_runstate(td, TD_VERIFYING);
 
 	io_u = NULL;

@@ -103,9 +103,13 @@ static unsigned int get_hdr_inc(struct thread_data *td, struct io_u *io_u)
 	/*
 	 * If we use bs_unaligned, buflen can be larger than the verify
 	 * interval (which just defaults to the smallest blocksize possible).
+	 *
+	 * If --read_iolog is given, we just can't use @verify_interval simply
+	 * since iolog might have various xfer size.
 	 */
 	hdr_inc = io_u->buflen;
-	if (td->o.verify_interval && td->o.verify_interval <= io_u->buflen &&
+	if (!td->o.read_iolog_file &&
+	    td->o.verify_interval && td->o.verify_interval <= io_u->buflen &&
 	    !td->o.bs_unaligned)
 		hdr_inc = td->o.verify_interval;
 

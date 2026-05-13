@@ -828,7 +828,8 @@ static inline bool fio_offset_overlap_risk(struct thread_data *td)
 {
 	if (td->o.norandommap || td->o.softrandommap ||
 	    td->o.ddir_seq_add || (td->o.ddir_seq_nr > 1) ||
-	    td->o.io_size > td->o.size)
+	    td->o.io_size > td->o.size ||
+	    td->o.read_iolog_file)
 		return true;
 
 	return false;
