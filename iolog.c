@@ -54,6 +54,16 @@ void log_io_u(const struct thread_data *td, const struct io_u *io_u)
 
 }
 
+void log_io_u_error(const struct thread_data *td, const struct io_u *io_u)
+{
+	if (!td->o.write_iolog_file || !td->iolog_f)
+		return;
+
+	fprintf(td->iolog_f, "%llu %s error %llu %llu %d\n",
+		(unsigned long long) utime_since_now(&td->io_log_start_time),
+		io_u->file->file_name, io_u->offset, io_u->buflen, io_u->error);
+}
+
 void log_file(struct thread_data *td, struct fio_file *f,
 	      enum file_log_act what)
 {
@@ -525,7 +535,9 @@ static bool read_iolog(struct thread_data *td)
 				if (td->o.replay_skip & (1u << DDIR_TRIM))
 					continue;
 				rw = DDIR_TRIM;
-			} else {
+			} else if (!strcmp(act, "error"))
+				continue;
+			else {
 				log_err("fio: bad iolog file action: %s\n",
 									act);
 				continue;

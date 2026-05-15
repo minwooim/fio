@@ -2211,6 +2211,7 @@ static void io_completed(struct thread_data *td, struct io_u **io_u_ptr,
 error:
 		icd->error = io_u->error;
 		io_u_log_error(td, io_u);
+		log_io_u_error(td, io_u);
 	}
 	if (icd->error) {
 		enum error_type_bit eb = td_error_type(ddir, icd->error);
